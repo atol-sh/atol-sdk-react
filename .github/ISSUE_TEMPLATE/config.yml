@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/atol-sh/atol-sdk-react/security/policy
+    about: Please report security issues privately per SECURITY.md, not as a public issue.
+  - name: Questions and usage help
+    url: https://atol.sh
+    about: Product docs and support.
