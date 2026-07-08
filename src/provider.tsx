@@ -15,6 +15,7 @@ import {
 } from '@atol-sh/js'
 import { AtolContext } from './context'
 import { loadPermissions } from './lib/permissions'
+import { registerTestClient, clearTestClient } from './lib/test-bridge'
 import { DeviceProvider } from './device/DeviceProvider'
 import type { AtolConfig, AtolUser, PermissionCheck } from './types'
 
@@ -77,6 +78,7 @@ export function AtolProvider({
   useRefreshTokens = false,
   useRefreshTokensFallback = false,
   useDPoP = false,
+  allowTestSessions = false,
 }: AtolProviderProps) {
   const [isLoading, setIsLoading] = useState(true)
   const [user, setUser] = useState<AtolUser | null>(null)
@@ -196,8 +198,13 @@ export function AtolProvider({
       useRefreshTokensFallback,
       deriveEncryptionKey: deriveEncryptionKey === true,
       storage: 'memory',
+      allowTestSessions,
     })
     authRef.current = auth
+    // TEST ONLY: when the seam is enabled, publish this client so
+    // `installAtolTestHook()` (from `@atol-sh/react/testing`) can seed a
+    // session into it. Inert -- and the bridge is never touched -- otherwise.
+    if (allowTestSessions) registerTestClient(auth)
     let cancelled = false
     // Track identity so callbacks fire once per login/logout transition,
     // not on every proactive token renewal.
@@ -275,6 +282,9 @@ export function AtolProvider({
       // Drop the ref if it still points at the client we are tearing down,
       // so a stale (destroyed) instance is never read by an action callback.
       if (authRef.current === auth) authRef.current = null
+      // Mirror the ref teardown for the test bridge (guarded so a Strict-Mode
+      // throwaway unmount cannot clear a newer provider's registration).
+      if (allowTestSessions) clearTestClient(auth)
     }
     // Only run on mount. The client is built once from the initial props;
     // props are captured at construction (the client owns the session for

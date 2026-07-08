@@ -15,7 +15,14 @@
  * old internal-mock tests made maps onto an observable provider outcome.
  */
 import { vi } from 'vitest'
-import type { AtolBrowserAuth, AtolSession, AtolUser, DPoPProofResult } from '@atol-sh/js'
+import { parseAtolUser } from '@atol-sh/js'
+import type {
+  AtolBrowserAuth,
+  AtolSession,
+  AtolUser,
+  DPoPProofResult,
+  TokenResponse,
+} from '@atol-sh/js'
 
 export interface FakeAuthConfig {
   /** Session the client settles into when `init()` runs. */
@@ -77,6 +84,7 @@ export interface FakeAuth extends AtolBrowserAuth {
     forceRenew: ReturnType<typeof vi.fn>
     getAccessToken: ReturnType<typeof vi.fn>
     signDPoPProof: ReturnType<typeof vi.fn>
+    seedTestSession: ReturnType<typeof vi.fn>
     destroy: ReturnType<typeof vi.fn>
   }
 }
@@ -104,6 +112,7 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
     forceRenew: vi.fn(),
     getAccessToken: vi.fn(),
     signDPoPProof: vi.fn(),
+    seedTestSession: vi.fn(),
     destroy: vi.fn(),
   }
 
@@ -149,6 +158,20 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
       return accessToken
     }),
     signDPoPProof: spies.signDPoPProof.mockImplementation(async () => proofResult()),
+    seedTestSession: spies.seedTestSession.mockImplementation(
+      async (tokens: TokenResponse): Promise<AtolSession> => {
+        // Mirror the real client: adopt the seeded tokens and emit an
+        // authenticated session parsed from the id token. The provider (which
+        // owns this fake under allowTestSessions) then flips to authenticated.
+        if (tokens.access_token) accessToken = tokens.access_token
+        if (tokens.id_token) idToken = tokens.id_token
+        const user = tokens.id_token ? parseAtolUser(tokens.id_token) : null
+        if (user?.id) {
+          emit({ isAuthenticated: true, user })
+        }
+        return session
+      },
+    ),
     isDPoPActive: () => dpopActive,
     onSessionChange: (cb: (s: AtolSession) => void) => {
       subscribers.add(cb)

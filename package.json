@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/react",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Atol React SDK — authentication and frontend authorization",
   "license": "Apache-2.0",
   "type": "module",
@@ -18,6 +18,17 @@
         "default": "./dist/index.cjs"
       },
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "import": {
+        "types": "./dist/testing.d.ts",
+        "default": "./dist/testing.js"
+      },
+      "require": {
+        "types": "./dist/testing.d.cts",
+        "default": "./dist/testing.cjs"
+      },
+      "default": "./dist/testing.js"
     },
     "./package.json": "./package.json"
   },
@@ -46,7 +57,7 @@
   },
   "author": "Atol",
   "dependencies": {
-    "@atol-sh/js": "^0.1.0",
+    "@atol-sh/js": "^0.1.1",
     "jose": "^5.10.0",
     "oidc-client-ts": "^3.3.0"
   },

@@ -6,13 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [0.3.1] - 2026-07-08
+
+### Added
+
+- Test-session seam (`@atol-sh/react/testing`): `installAtolTestHook()`
+  publishes `window.__ATOL_TEST__.seedSession(tokens)`, which establishes an
+  authenticated session in a mounted `<AtolProvider allowTestSessions>`
+  directly from a token response — no OIDC redirect, no live IdP round-trip.
+  This restores browser e2e testing (Cypress/Playwright) against the
+  in-memory token store, where priming `sessionStorage` no longer works. New
+  `allowTestSessions` prop on `<AtolProvider>` (default `false`); the seam
+  ships on its own subpath so its `window` glue stays out of app bundles that
+  never import it. Test-only: the sole security boundary is
+  `allowTestSessions` (off by default, core throws when disabled), so it is
+  inert in production. Requires `@atol-sh/js` >= 0.1.1 (`seedTestSession`).
+  See `EXAMPLES.md`.
+
 ### Changed
 
-- In-progress core extraction: `@atol-sh/react` is being refactored to
-  re-export its browser-security core (token storage, DPoP, silent renew,
-  cross-tab coordination, encryption primitives) from the new `@atol-sh/js`
-  package instead of implementing it directly. Working tree only, not yet
-  released.
+- Require `@atol-sh/js` `^0.1.1` (was `^0.1.0`): the `./testing` seam depends
+  on `seedTestSession`, added in that release.
 
 ## [0.3.0] - 2026-07-05
 

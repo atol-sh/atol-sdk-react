@@ -4,7 +4,11 @@ import { readFileSync, writeFileSync } from 'node:fs'
 const USE_CLIENT = '"use client";\n'
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  // Main entry plus the TEST-ONLY `./testing` subpath. `src/testing.ts` has a
+  // distinct basename so it emits `dist/testing.*` without colliding with
+  // `dist/index.*`. It carries no React and gets no "use client" banner (see
+  // onSuccess below, which only stamps the index bundles).
+  entry: ['src/index.ts', 'src/testing.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   splitting: false,

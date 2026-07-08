@@ -223,3 +223,78 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
 Do not import `@atol-sh/react` into a Server Component — it uses React
 context, browser crypto, and IndexedDB, all client-only.
+
+## Testing: seed a session in Cypress / Playwright
+
+Tokens live in an in-memory store, so an e2e test cannot prime
+`sessionStorage` to fake a login, and a full OIDC redirect is slow and flaky
+against a stubbed backend. The `@atol-sh/react/testing` seam bootstraps an
+authenticated session directly from a token response — no IdP round-trip,
+works with route guards (`<ProtectedRoute>`) and a stubbed backend.
+
+It is **test-only**. The one security boundary is the provider's
+`allowTestSessions` flag: it defaults to `false` and the underlying core
+throws while it is off, so the seam is inert in production as long as you never
+enable it there. `installAtolTestHook()` is a convenience that exposes
+`window.__ATOL_TEST__` — not a second security gate — so gate
+`allowTestSessions` itself behind a build/env flag.
+
+1. Render `<AtolProvider allowTestSessions>` — gate the flag behind a build/env
+   flag so it is never on in a production bundle.
+2. Call `installAtolTestHook()` once from your test-build **app entry** to
+   publish `window.__ATOL_TEST__`.
+
+```tsx
+// src/main.tsx (or a test-only entry)
+import { installAtolTestHook } from '@atol-sh/react/testing'
+
+const testMode = import.meta.env.MODE === 'test' // however you flag test builds
+if (testMode) installAtolTestHook()
+
+createRoot(document.getElementById('root')!).render(
+  <AtolProvider
+    keyId="atol_kid_abc123"
+    authority="https://auth.atol.sh"
+    redirectUri={window.location.origin + '/'}
+    allowTestSessions={testMode}
+  >
+    <App />
+  </AtolProvider>,
+)
+```
+
+```ts
+// cypress: after cy.visit(), flip to authenticated with no IdP round-trip
+cy.visit('/')
+cy.window().then((w) =>
+  w.__ATOL_TEST__!.seedSession({
+    access_token,
+    id_token,
+    refresh_token,
+    token_type: 'Bearer',
+    scope: 'openid profile email offline_access',
+    expires_in: 3600,
+  }),
+)
+// the app is now authenticated; ProtectedRoute renders its children
+```
+
+The seam skips OIDC signature/state/nonce checks, which is safe only because
+your API still validates the presented token server-side; never enable it in
+production.
+
+**Gotchas**
+
+- **Give the access token a future `exp`.** Use a token minted by your test
+  IdP / mock issuer (the one your specs already use). A token with a past or
+  missing `exp` makes the client attempt an immediate renewal the hermetic
+  environment cannot satisfy, which can flip the seeded session straight back
+  to signed-out. `seedSession` logs a `console.warn` when it sees this.
+- **Same realm.** `installAtolTestHook()` and `<AtolProvider>` must run in the
+  same window — your application-under-test bundle. Installing the hook from a
+  Cypress spec/support file (the runner's realm) leaves the bridge empty and
+  `seedSession` rejects with "no provider mounted". Install it from the app
+  entry, gated on the test flag.
+- **One provider.** The bridge tracks a single mounted
+  `<AtolProvider allowTestSessions>`; mount one (the usual shape for an app
+  under test).

@@ -97,6 +97,22 @@ export interface AtolConfig {
    * alongside `useRefreshTokens: true` for the strongest SPA posture.
    */
   useDPoP?: boolean
+
+  /**
+   * TEST ONLY. Enable the browser test-session seam: register the mounted
+   * provider's auth client so `installAtolTestHook()` (from
+   * `@atol-sh/react/testing`) can seed an authenticated session via
+   * `window.__ATOL_TEST__.seedSession(tokens)` -- no OIDC redirect, no live
+   * IdP round-trip, works against in-memory token storage and route guards.
+   *
+   * Defaults to `false`. Set it ONLY in test builds (e.g. gate it behind a
+   * Vite env flag): it bypasses OIDC signature/state/nonce validation, and
+   * shipping it enabled would let an XSS payload forge a session -- exactly
+   * the risk in-memory token storage exists to close. The underlying core
+   * client also logs a one-time `console.warn` when this is on. See
+   * `EXAMPLES.md` for the Cypress recipe.
+   */
+  allowTestSessions?: boolean
 }
 
 /** Full auth + permission state exposed by the provider. */

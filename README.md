@@ -153,6 +153,7 @@ Mount once at the root of your app.
 | `useDPoP` | `boolean` | No | Sender-constrained tokens (RFC 9449). Generates a per-tab non-exportable ES256 keypair and attaches a DPoP proof to every token-endpoint call, so a stolen refresh token cannot be redeemed elsewhere. Default: `false` |
 | `deriveEncryptionKey` | `boolean` | No | Zero-knowledge encryption: ask the server to derive a KEK at login and deliver a wrapped DEK. The unwrapped DEK is exposed as `encryptionKey`. Default: `false` |
 | `deviceIntelligence` | `DeviceConfig` | No | Device intelligence config (see below) |
+| `allowTestSessions` | `boolean` | No | **Test only.** Enable the `@atol-sh/react/testing` seam so e2e tests can seed an authenticated session without a live OIDC round-trip. Gate it behind a build/env flag — it bypasses OIDC validation and must never ship enabled. Default: `false`. See [EXAMPLES.md](./EXAMPLES.md#testing-seed-a-session-in-cypress--playwright) |
 
 ### `useAtol()`
 
