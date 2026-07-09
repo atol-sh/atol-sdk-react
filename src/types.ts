@@ -7,8 +7,9 @@ import type {
   PermissionCheck,
   PermissionResult,
   DPoPProofResult,
+  TokenResponse,
 } from '@atol-sh/js'
-export type { AtolUser, PermissionCheck, PermissionResult, DPoPProofResult }
+export type { AtolUser, PermissionCheck, PermissionResult, DPoPProofResult, TokenResponse }
 
 /** Configuration for the AtolProvider. */
 export interface AtolConfig {
@@ -113,6 +114,19 @@ export interface AtolConfig {
    * `EXAMPLES.md` for the Cypress recipe.
    */
   allowTestSessions?: boolean
+
+  /**
+   * TEST ONLY. A token response the provider adopts during mount instead of
+   * the cold-load restore, so the app renders authenticated at first paint --
+   * no OIDC round-trip and, crucially, no silent-renew iframe (which, against a
+   * stubbed backend with no IdP, would otherwise block until it times out).
+   * Requires `allowTestSessions: true` (ignored otherwise). Read the token from
+   * your test harness (e.g. a value your e2e command stashed) and pass it here
+   * only in test builds. Deterministic and race-free -- preferred over seeding
+   * via `@atol-sh/react/testing` after mount when you control the provider
+   * config. Never set in production. See `EXAMPLES.md`.
+   */
+  initialTestSession?: TokenResponse
 }
 
 /** Full auth + permission state exposed by the provider. */

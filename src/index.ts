@@ -39,4 +39,5 @@ export type {
   AtolHookValue,
   DPoPProofResult,
   PermissionCheck,
+  TokenResponse,
 } from './types'

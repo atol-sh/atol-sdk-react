@@ -79,6 +79,7 @@ export function AtolProvider({
   useRefreshTokensFallback = false,
   useDPoP = false,
   allowTestSessions = false,
+  initialTestSession,
 }: AtolProviderProps) {
   const [isLoading, setIsLoading] = useState(true)
   const [user, setUser] = useState<AtolUser | null>(null)
@@ -199,6 +200,7 @@ export function AtolProvider({
       deriveEncryptionKey: deriveEncryptionKey === true,
       storage: 'memory',
       allowTestSessions,
+      initialTestSession,
     })
     authRef.current = auth
     // TEST ONLY: when the seam is enabled, publish this client so

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes yet.
 
+## [0.3.2] - 2026-07-08
+
+### Added
+
+- `initialTestSession` prop on `<AtolProvider>` (requires `allowTestSessions`).
+  The provider adopts the given token response during mount instead of the
+  cold-load restore, so a browser e2e test renders authenticated at first paint
+  with no OIDC round-trip and no silent-renew iframe. Preferred over seeding via
+  `@atol-sh/react/testing` after mount when you control the provider config:
+  deterministic and race-free, and it avoids the restore iframe that blocks
+  against a stubbed backend with no IdP. Re-exports the `TokenResponse` type.
+  Requires `@atol-sh/js` >= 0.1.2.
+
+### Changed
+
+- Require `@atol-sh/js` `^0.1.2` (was `^0.1.1`) for `initialTestSession`.
+
 ## [0.3.1] - 2026-07-08
 
 ### Added

@@ -228,15 +228,61 @@ context, browser crypto, and IndexedDB, all client-only.
 
 Tokens live in an in-memory store, so an e2e test cannot prime
 `sessionStorage` to fake a login, and a full OIDC redirect is slow and flaky
-against a stubbed backend. The `@atol-sh/react/testing` seam bootstraps an
-authenticated session directly from a token response — no IdP round-trip,
-works with route guards (`<ProtectedRoute>`) and a stubbed backend.
+against a stubbed backend. There are two ways to bootstrap a session; both are
+**test-only** and gated on `allowTestSessions`.
 
-It is **test-only**. The one security boundary is the provider's
-`allowTestSessions` flag: it defaults to `false` and the underlying core
-throws while it is off, so the seam is inert in production as long as you never
-enable it there. `installAtolTestHook()` is a convenience that exposes
-`window.__ATOL_TEST__` — not a second security gate — so gate
+### Preferred: `initialTestSession` (deterministic, no restore iframe)
+
+If you control the provider config, pass the token as `initialTestSession`. The
+provider adopts it during mount and **skips the cold-load restore entirely** —
+so the app is authenticated at first paint with no OIDC round-trip and no
+silent-renew iframe. This is the right choice for a route-guarded app on a
+stubbed backend: there is no unauthenticated flash to redirect on, and no
+restore iframe to hang against a missing IdP.
+
+```tsx
+// src/main.tsx — read a token your e2e harness stashed (test builds only)
+const E2E = typeof window !== 'undefined' && Boolean((window as { Cypress?: unknown }).Cypress)
+const seed = E2E ? JSON.parse(sessionStorage.getItem('app:e2e-seed') ?? 'null') : undefined
+
+<AtolProvider
+  keyId="atol_kid_abc123"
+  authority="https://auth.atol.sh"
+  redirectUri={window.location.origin + '/'}
+  allowTestSessions={E2E}
+  initialTestSession={seed}   // adopted on mount; restore skipped
+>
+  <App />
+</AtolProvider>
+```
+
+```ts
+// cypress: stash BEFORE visit — the app reads it on mount, no post-visit step
+cy.window({ log: false }).then((w) =>
+  w.sessionStorage.setItem('app:e2e-seed', JSON.stringify({
+    access_token, id_token, token_type: 'Bearer',
+    scope: 'openid profile email', expires_in: 3600,
+  })),
+)
+cy.visit('/collections')   // renders authenticated; guards pass; no redirect
+```
+
+Give the access token a future `exp` (the SDK warns otherwise). `initialTestSession`
+is ignored unless `allowTestSessions` is `true`.
+
+### Alternative: seed after mount via `@atol-sh/react/testing`
+
+When you can't pass the token at config time (e.g. it's chosen per-test after
+the app is already mounted), use the `installAtolTestHook()` seam instead: it
+seeds a session from a token response after the app has mounted. Note this does
+NOT skip the cold-load restore, so on a stubbed backend with no IdP the provider
+still opens (and waits out) the silent-renew iframe before your seed lands —
+prefer `initialTestSession` above unless you truly need to seed post-mount.
+
+Same security boundary: the `allowTestSessions` flag defaults to `false` and the
+underlying core throws while it is off, so the seam is inert in production as
+long as you never enable it there. `installAtolTestHook()` is a convenience that
+exposes `window.__ATOL_TEST__` — not a second security gate — so gate
 `allowTestSessions` itself behind a build/env flag.
 
 1. Render `<AtolProvider allowTestSessions>` — gate the flag behind a build/env
