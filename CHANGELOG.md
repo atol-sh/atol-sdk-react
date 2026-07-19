@@ -6,7 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No unreleased changes yet.
+## [0.3.3] - 2026-07-19
+
+### Fixed
+
+- React 18 and 19 Strict Mode no longer create two independent browser-auth clients
+  that race consumption of the single-use OIDC callback state. The provider
+  reuses one client across the synchronous development double-mount, defers
+  teardown until a real unmount, and keeps the test-session bridge aligned
+  with that lifecycle.
+- Strict Mode client reuse now treats each `initialTestSession` token response
+  as part of client identity without serializing its credential material.
 
 ## [0.3.2] - 2026-07-08
 

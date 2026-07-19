@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/react",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Atol React SDK — authentication and frontend authorization",
   "license": "Apache-2.0",
   "type": "module",
@@ -67,21 +67,21 @@
     "react-dom": "^18.0.0 || ^19.0.0"
   },
   "devDependencies": {
-    "@arethetypeswrong/cli": "^0.18.4",
+    "@arethetypeswrong/cli": "^0.18.5",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.3.0",
     "@types/node": "^22.20.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "@vitest/coverage-v8": "^3.2.6",
+    "@vitest/coverage-v8": "^4.1.10",
     "fake-indexeddb": "^6.2.5",
-    "jsdom": "^26.1.0",
+    "jsdom": "^29.1.1",
     "publint": "^0.3.21",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "tsup": "^8.4.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.1.0"
+    "vitest": "^4.1.10"
   },
   "peerDependenciesMeta": {
     "@atol-sh/fingerprint": {
@@ -93,6 +93,9 @@
     "react-dom": {
       "optional": false
     }
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
   },
   "repository": {
     "type": "git",
@@ -109,5 +112,9 @@
     "oidc",
     "react",
     "permissions"
-  ]
+  ],
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": false
+  }
 }

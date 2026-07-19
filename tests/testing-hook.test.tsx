@@ -148,6 +148,13 @@ describe('bridge teardown', () => {
     expect(activeTestClient()).toBe(fake)
 
     unmount()
-    expect(activeTestClient()).toBeNull()
+    // Teardown (and the bridge clear that rides along with it) is deferred
+    // by one macrotask so a Strict Mode remount can cancel it and reuse this
+    // same client instead of racing a second one -- see `sharedClientSlot`
+    // in `src/provider.tsx`. A genuine unmount, like this one, still clears
+    // the registration; it just isn't synchronous with `unmount()` anymore.
+    expect(activeTestClient()).toBe(fake)
+    await waitFor(() => expect(activeTestClient()).toBeNull())
+    expect(fake.spies.destroy).toHaveBeenCalledTimes(1)
   })
 })

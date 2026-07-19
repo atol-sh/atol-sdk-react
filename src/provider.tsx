@@ -25,6 +25,129 @@ export type AtolProviderProps = PropsWithChildren<AtolConfig>
 const DEFAULT_API_URL = 'https://api.atol.sh'
 
 /**
+ * Module-scoped bridge across React 19 Strict Mode's synchronous
+ * mount -> cleanup -> remount cycle.
+ *
+ * The core client's callback processing (oidc-client-ts's
+ * `signinRedirectCallback` -> `readSigninResponseState`) removes the
+ * single-use OIDC state/PKCE entry from sessionStorage as the FIRST step of
+ * validating an authorization-code callback -- before the token-endpoint
+ * exchange even starts. Building a SECOND, independent
+ * `createAtolBrowserAuth` client for Strict Mode's real mount (as this
+ * provider used to: fresh client per effect run, `destroy()`ed on cleanup)
+ * races that removal against the throwaway mount's client: whichever
+ * client's `init()` reaches the state store first wins the exchange, and
+ * the other's `completeLogin()` fails with "No matching state found in
+ * storage" and settles permanently unauthenticated -- the core swallows
+ * that failure into `clearSession()` inside `init()`, so no error ever
+ * reaches this provider or the app. The throwaway client's own exchange can
+ * still succeed against the live token endpoint (which is why a manual curl
+ * replay of the same flow is accepted server-side), but its result lands
+ * nowhere: `destroy()` already cleared its subscriber set before the
+ * exchange resolved.
+ *
+ * The fix: collapse Strict Mode's double mount onto a SINGLE client
+ * instance instead of racing two. `auth.init()` is memoized on the core
+ * client (a second call returns the same in-flight/settled promise), so
+ * reusing the same instance for both the throwaway and the real mount means
+ * only one `completeLogin()` ever runs against sessionStorage -- no race.
+ * Teardown is deferred by one macrotask on cleanup: if a remount follows
+ * synchronously -- which Strict Mode's double-invoke always does, within
+ * the same passive-effects flush, before any timer can fire -- it cancels
+ * the pending teardown and adopts the client instead of building a new one.
+ * A genuine unmount (no remount follows in that tick) lets the timer fire
+ * and destroys the client for real, exactly once.
+ */
+interface SharedClientSlot {
+  key: string
+  auth: AtolBrowserAuth
+  teardownTimer: ReturnType<typeof setTimeout> | null
+}
+let sharedClientSlot: SharedClientSlot | null = null
+
+// `initialTestSession` contains bearer credentials and refresh-token material,
+// so it must never participate in a serialized config key. Object identity is
+// deliberately conservative: the same object can be reused across React's
+// Strict Mode effect replay, while any newly supplied token response forces a
+// fresh core client even when its non-secret configuration is unchanged.
+const initialTestSessionIDs = new WeakMap<object, number>()
+let nextInitialTestSessionID = 1
+
+function initialTestSessionID(
+  session: AtolConfig['initialTestSession'],
+): number {
+  if (!session) return 0
+  const existing = initialTestSessionIDs.get(session)
+  if (existing !== undefined) return existing
+  const id = nextInitialTestSessionID++
+  initialTestSessionIDs.set(session, id)
+  return id
+}
+
+/**
+ * Stable identity for the auth client's construction config. Only fields
+ * that actually shape `createAtolBrowserAuth()` participate -- callbacks
+ * (onLogin/onLogout/onPermissionsError) and the permission-check list are
+ * mirrored into refs and read live by the effect, never baked into the
+ * client, so they are deliberately excluded.
+ */
+function clientConfigKey(cfg: {
+  authority: string
+  keyId: string
+  redirectUri: string
+  scope: string
+  audience: string | undefined
+  useDPoP: boolean
+  useRefreshTokens: boolean
+  useRefreshTokensFallback: boolean
+  deriveEncryptionKey: boolean
+  allowTestSessions: boolean
+  initialTestSession: AtolConfig['initialTestSession']
+}): string {
+  return JSON.stringify([
+    cfg.authority,
+    cfg.keyId,
+    cfg.redirectUri,
+    cfg.scope,
+    cfg.audience ?? '',
+    cfg.useDPoP,
+    cfg.useRefreshTokens,
+    cfg.useRefreshTokensFallback,
+    cfg.deriveEncryptionKey,
+    cfg.allowTestSessions,
+    cfg.allowTestSessions ? initialTestSessionID(cfg.initialTestSession) : 0,
+  ])
+}
+
+/**
+ * TEST ONLY. Force-clear the module-scoped shared-client bridge and
+ * synchronously destroy whatever client currently occupies it (whether its
+ * teardown is pending or it is still actively mounted).
+ *
+ * The deferred-teardown window that makes Strict Mode's double-invoke safe
+ * (see the comment above `sharedClientSlot`) is scoped to "does a remount
+ * follow synchronously in this effects flush", not "does another render()
+ * call happen eventually". A test harness that unmounts one `<AtolProvider>`
+ * render and mounts another with the same config (React Testing Library's
+ * per-test `cleanup()`, run via a global `afterEach`) does NOT run inside
+ * that flush, so without this reset the next test's mount would wrongly
+ * adopt the previous test's still-pending-teardown client instead of
+ * building its own. Not part of the public API -- call from a test setup
+ * file's `afterEach`, e.g. `@atol-sh/react`'s own `tests/setup.ts`.
+ */
+export function __resetAtolSharedClientForTests(): void {
+  const slot = sharedClientSlot
+  sharedClientSlot = null
+  if (!slot) return
+  if (slot.teardownTimer !== null) clearTimeout(slot.teardownTimer)
+  slot.auth.destroy()
+  // Mirror the deferred-teardown path's bridge cleanup (see the effect
+  // cleanup below). A no-op when this client was never the registered test
+  // client (allowTestSessions off, or already superseded).
+  clearTestClient(slot.auth)
+}
+
+/**
  * AtolProvider wraps your app with authentication (OIDC) and
  * frontend authorization (permission loading). Mount once at the root.
  *
@@ -101,12 +224,12 @@ export function AtolProvider({
 
   // The single auth client that owns the session + renewal. Every
   // credential decision (token access, renewal, DPoP proof, login, logout)
-  // delegates here. The instance is created and torn down inside the mount
-  // effect below -- NOT in the render body -- so React Strict Mode's
-  // mount/unmount/remount cycle always runs against a fresh, live client
-  // (the throwaway first client is destroyed and a new one built on
-  // remount). The action callbacks read this ref only after mount, by which
-  // point the effect has populated it.
+  // delegates here. The instance is created (or, on a Strict Mode remount,
+  // adopted from `sharedClientSlot` -- see the module-scoped comment above)
+  // inside the mount effect below, NOT in the render body, so its lifetime
+  // is tied to the effect rather than to a single render. The action
+  // callbacks read this ref only after mount, by which point the effect has
+  // populated it.
   const authRef = useRef<AtolBrowserAuth | null>(null)
 
   // Mirror volatile state/props into refs so the stable callbacks below can
@@ -182,31 +305,62 @@ export function AtolProvider({
    * on mount; the client is torn down on unmount.
    */
   useEffect(() => {
-    // Build the client here (once per effect-mount) so Strict Mode's
-    // throwaway mount gets its own instance that is fully destroyed on
-    // cleanup, and the real mount gets a fresh, live one. The client owns
-    // the zero-knowledge KEK/DEK flow entirely (fragment capture before the
-    // callback URL is stripped, vault provision/rehydrate, fail-loud unwrap)
-    // -- gated on deriveEncryptionKey -- so the provider does none of it.
-    const auth = createAtolBrowserAuth({
-      issuer: authority,
-      clientId: keyId,
+    // Resolve the client for this effect-mount: adopt the shared instance
+    // from a still-pending teardown (a Strict Mode remount landing on the
+    // throwaway mount's client) when its config matches, otherwise build a
+    // fresh one. See the module-scoped comment above `sharedClientSlot` for
+    // why reuse -- not "always fresh" -- is what makes this Strict
+    // Mode-safe. The client owns the zero-knowledge KEK/DEK flow entirely
+    // (fragment capture before the callback URL is stripped, vault
+    // provision/rehydrate, fail-loud unwrap) -- gated on deriveEncryptionKey
+    // -- so the provider does none of it.
+    const key = clientConfigKey({
+      authority,
+      keyId,
       redirectUri,
-      scopes: scope,
+      scope,
       audience,
-      dpop: useDPoP,
+      useDPoP,
       useRefreshTokens,
       useRefreshTokensFallback,
       deriveEncryptionKey: deriveEncryptionKey === true,
-      storage: 'memory',
       allowTestSessions,
       initialTestSession,
     })
+
+    let auth: AtolBrowserAuth
+    const pending = sharedClientSlot
+    if (pending && pending.key === key && pending.teardownTimer !== null) {
+      // A remount landed on the still-torn-down-pending client from a
+      // throwaway mount in the same synchronous effects flush. Cancel the
+      // scheduled teardown and adopt it instead of building (and racing) a
+      // second one.
+      clearTimeout(pending.teardownTimer)
+      pending.teardownTimer = null
+      auth = pending.auth
+    } else {
+      auth = createAtolBrowserAuth({
+        issuer: authority,
+        clientId: keyId,
+        redirectUri,
+        scopes: scope,
+        audience,
+        dpop: useDPoP,
+        useRefreshTokens,
+        useRefreshTokensFallback,
+        deriveEncryptionKey: deriveEncryptionKey === true,
+        storage: 'memory',
+        allowTestSessions,
+        initialTestSession,
+      })
+      sharedClientSlot = { key, auth, teardownTimer: null }
+      // TEST ONLY: when the seam is enabled, publish this client so
+      // `installAtolTestHook()` (from `@atol-sh/react/testing`) can seed a
+      // session into it. Inert -- and the bridge is never touched --
+      // otherwise.
+      if (allowTestSessions) registerTestClient(auth)
+    }
     authRef.current = auth
-    // TEST ONLY: when the seam is enabled, publish this client so
-    // `installAtolTestHook()` (from `@atol-sh/react/testing`) can seed a
-    // session into it. Inert -- and the bridge is never touched -- otherwise.
-    if (allowTestSessions) registerTestClient(auth)
     let cancelled = false
     // Track identity so callbacks fire once per login/logout transition,
     // not on every proactive token renewal.
@@ -262,7 +416,11 @@ export function AtolProvider({
     // Clear the loading gate only when the initial settle completes (the
     // redirect callback or the silent restore), NOT on the immediate
     // pre-init unauthenticated fire from onSessionChange -- otherwise a
-    // reload would flash "signed out" before the restore finishes.
+    // reload would flash "signed out" before the restore finishes. `init()`
+    // is memoized on the client (a second call, from a remount that adopted
+    // this same instance, returns the SAME promise) -- calling it here
+    // unconditionally is what makes the redirect-callback exchange run
+    // exactly once across a Strict Mode double-mount.
     auth
       .init()
       .catch((err) => {
@@ -280,17 +438,31 @@ export function AtolProvider({
     return () => {
       cancelled = true
       unsubscribe()
-      auth.destroy()
-      // Drop the ref if it still points at the client we are tearing down,
-      // so a stale (destroyed) instance is never read by an action callback.
+      // Drop the ref if it still points at the client this cleanup is
+      // (maybe) tearing down, so a stale/destroyed instance is never read by
+      // an action callback in the gap before a possible remount re-populates
+      // it.
       if (authRef.current === auth) authRef.current = null
-      // Mirror the ref teardown for the test bridge (guarded so a Strict-Mode
-      // throwaway unmount cannot clear a newer provider's registration).
-      if (allowTestSessions) clearTestClient(auth)
+      // Defer the actual teardown by one macrotask instead of destroying
+      // synchronously. Strict Mode's double-invoke runs mount -> cleanup ->
+      // remount synchronously within the same passive-effects flush -- well
+      // before any timer fires -- so a remount reusing this instance (the
+      // branch above) always cancels this timer first. Only a genuine
+      // unmount, where no remount follows, lets it fire and tear the client
+      // down for real, exactly once.
+      if (sharedClientSlot && sharedClientSlot.auth === auth) {
+        const slot = sharedClientSlot
+        slot.teardownTimer = setTimeout(() => {
+          auth.destroy()
+          if (allowTestSessions) clearTestClient(auth)
+          if (sharedClientSlot === slot) sharedClientSlot = null
+        }, 0)
+      }
     }
-    // Only run on mount. The client is built once from the initial props;
-    // props are captured at construction (the client owns the session for
-    // the provider's lifetime), so this effect intentionally has no deps.
+    // Only run on mount. The client is built (or adopted) once from the
+    // initial props; props are captured at construction (the client owns
+    // the session for the provider's lifetime), so this effect intentionally
+    // has no deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

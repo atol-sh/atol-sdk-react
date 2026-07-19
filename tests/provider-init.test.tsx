@@ -17,7 +17,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
 import * as React from 'react'
-import type { AtolSession } from '@atol-sh/js'
+import type { AtolSession, TokenResponse } from '@atol-sh/js'
 import { makeFakeAuth, type FakeAuth } from './fake-auth'
 import { makeIDToken } from './helpers'
 import { atolUser } from './fixtures'
@@ -25,13 +25,13 @@ import { atolUser } from './fixtures'
 let fake: FakeAuth
 // Overridable factory: each createAtolBrowserAuth() call routes here so a
 // test can return fresh instances (e.g. to exercise Strict Mode recreation).
-let authFactory: () => FakeAuth = () => fake
+let authFactory: (config?: unknown) => FakeAuth = () => fake
 
 vi.mock('@atol-sh/js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@atol-sh/js')>()
   return {
     ...actual,
-    createAtolBrowserAuth: () => authFactory(),
+    createAtolBrowserAuth: (config: unknown) => authFactory(config),
   }
 })
 
@@ -236,10 +236,12 @@ describe('AtolProvider init', () => {
     })
   })
 
-  it('is Strict Mode-safe: destroys the throwaway client and runs on a fresh one', async () => {
-    // Strict Mode mounts -> unmounts -> remounts. The effect destroys the
-    // first (throwaway) client on cleanup; the provider must construct and
-    // subscribe to a FRESH client on remount, not re-use the torn-down one.
+  it('is Strict Mode-safe: reuses ONE client across the double-mount instead of racing two', async () => {
+    // Strict Mode mounts -> unmounts -> remounts, synchronously, within the
+    // same passive-effects flush. The provider must collapse this onto a
+    // SINGLE `createAtolBrowserAuth` instance -- building (and destroying) a
+    // second, independent one is exactly the regression this guards against
+    // (see the next test for the mechanism it would trigger).
     const created: FakeAuth[] = []
     authFactory = () => {
       const f = makeFakeAuth({
@@ -265,10 +267,169 @@ describe('AtolProvider init', () => {
     )
 
     await waitFor(() => expect(latest!.isAuthenticated).toBe(true))
-    // Two clients created (throwaway + real); the throwaway was destroyed.
-    expect(created.length).toBe(2)
-    expect(created[0].spies.destroy).toHaveBeenCalled()
-    // The live client (the last created) drives the session.
-    expect(created.at(-1)!.spies.init).toHaveBeenCalled()
+    // Exactly one client is ever constructed for the double-mount.
+    expect(created.length).toBe(1)
+    // It drives the session and is NOT torn down while the provider is
+    // mounted (the throwaway mount's cleanup must not destroy the instance
+    // the real mount goes on to use).
+    expect(created[0].spies.init).toHaveBeenCalled()
+    expect(created[0].spies.destroy).not.toHaveBeenCalled()
+  })
+
+  it('Strict Mode double-mount does not race a second completeLogin() over the single-use OIDC state', async () => {
+    // Regression test for PIK-116 / the atol-sdk-react StrictMode callback
+    // bug: a genuine authorization-code exchange whose token the app never
+    // sees because two independent client instances raced each other over
+    // the single-use OIDC state/PKCE entry that oidc-client-ts removes from
+    // sessionStorage as the FIRST step of processing a callback (before the
+    // token-endpoint exchange even starts). Model that shared, single-use
+    // resource directly: the FIRST client instance to call init() consumes
+    // it and (after a simulated network round trip) settles authenticated;
+    // any OTHER, independent instance that raced it finds the resource
+    // already gone and settles unauthenticated -- exactly like the real
+    // core swallowing "No matching state found in storage" inside init().
+    //
+    // Before the fix (a fresh client built and destroyed on every effect
+    // run) this reproduces the bug: two instances are built, the throwaway
+    // one wins the race and its result lands nowhere (destroyed, no
+    // subscribers), and the LIVE instance loses the race and settles
+    // permanently unauthenticated. After the fix, Strict Mode's double
+    // mount collapses onto one instance, so there is no race to lose.
+    const created: FakeAuth[] = []
+    const initPromises = new WeakMap<FakeAuth, Promise<AtolSession>>()
+    let singleUseStateConsumed = false
+
+    authFactory = () => {
+      const f = makeFakeAuth({
+        accessToken: 'at_race',
+        idToken: makeIDToken(),
+      })
+      // Memoize init() PER INSTANCE, mirroring the real core's own
+      // `initPromise` cache -- a second call on the SAME instance (as this
+      // provider now makes, once per effect-mount that adopts it) must
+      // return the original in-flight/settled promise, not re-run and
+      // re-race the shared resource against itself.
+      f.spies.init.mockImplementation(() => {
+        let p = initPromises.get(f)
+        if (!p) {
+          p = (async () => {
+            if (singleUseStateConsumed) {
+              f.emit({ isAuthenticated: false, user: null })
+              return { isAuthenticated: false, user: null }
+            }
+            singleUseStateConsumed = true
+            // Simulate the token-endpoint network round trip.
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            f.emit(authedSession)
+            return authedSession
+          })()
+          initPromises.set(f, p)
+        }
+        return p
+      })
+      created.push(f)
+      return f
+    }
+
+    let latest: Snapshot | null = null
+    render(
+      <React.StrictMode>
+        <AtolProvider
+          keyId="atol_kid_test"
+          authority="https://auth.atol.test"
+          redirectUri="https://app.test/cb"
+        >
+          <Harness onState={(s) => (latest = s)} />
+        </AtolProvider>
+      </React.StrictMode>,
+    )
+
+    await waitFor(() => expect(latest!.isLoading).toBe(false))
+    // The exchanged session must be visible to the LIVE provider -- not
+    // lost to a race with a throwaway instance.
+    expect(latest!.isAuthenticated).toBe(true)
+    expect(latest!.user?.id).toBe('user-1')
+    expect(created.length).toBe(1)
+  })
+
+  it('does not reuse a pending client for a different initial test session', async () => {
+    const created: FakeAuth[] = []
+    const configs: Array<{ initialTestSession?: TokenResponse }> = []
+    authFactory = (config) => {
+      configs.push(config as { initialTestSession?: TokenResponse })
+      const client = makeFakeAuth()
+      created.push(client)
+      return client
+    }
+
+    const firstSession = {
+      access_token: 'first-secret-access-token',
+      id_token: 'first-secret-id-token',
+      token_type: 'Bearer',
+      expires_in: 3600,
+    } satisfies TokenResponse
+    const secondSession = {
+      access_token: 'second-secret-access-token',
+      id_token: 'second-secret-id-token',
+      token_type: 'Bearer',
+      expires_in: 3600,
+    } satisfies TokenResponse
+
+    const first = render(
+      <AtolProvider
+        keyId="atol_kid_test"
+        authority="https://auth.atol.test"
+        redirectUri="https://app.test/cb"
+        allowTestSessions
+        initialTestSession={firstSession}
+      >
+        <Harness onState={() => undefined} />
+      </AtolProvider>,
+    )
+    first.unmount()
+
+    render(
+      <AtolProvider
+        keyId="atol_kid_test"
+        authority="https://auth.atol.test"
+        redirectUri="https://app.test/cb"
+        allowTestSessions
+        initialTestSession={secondSession}
+      >
+        <Harness onState={() => undefined} />
+      </AtolProvider>,
+    )
+
+    expect(created).toHaveLength(2)
+    expect(configs[0].initialTestSession).toBe(firstSession)
+    expect(configs[1].initialTestSession).toBe(secondSession)
+  })
+
+  it('keys initial test sessions without serializing credential material', () => {
+    const session = {
+      access_token: 'must-not-be-serialized',
+      id_token: 'must-not-be-serialized-either',
+      token_type: 'Bearer',
+      expires_in: 3600,
+    } satisfies TokenResponse
+    Object.defineProperty(session, 'toJSON', {
+      value: () => {
+        throw new Error('credential material was serialized')
+      },
+    })
+
+    expect(() => render(
+      <React.StrictMode>
+        <AtolProvider
+          keyId="atol_kid_test"
+          authority="https://auth.atol.test"
+          redirectUri="https://app.test/cb"
+          allowTestSessions
+          initialTestSession={session}
+        >
+          <Harness onState={() => undefined} />
+        </AtolProvider>
+      </React.StrictMode>,
+    )).not.toThrow()
   })
 })
