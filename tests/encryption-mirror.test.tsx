@@ -17,11 +17,10 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
-import * as React from 'react'
 import type { AtolSession } from '@atol-sh/js'
 import { makeFakeAuth, type FakeAuth } from './fake-auth'
 import { makeIDToken } from './helpers'
-import { atolUser } from './fixtures'
+import { atolSession } from './fixtures'
 
 let fake: FakeAuth
 
@@ -61,7 +60,7 @@ function renderProvider(onState: (s: Snapshot) => void, deriveEncryptionKey = tr
   )
 }
 
-const authedSession: AtolSession = { isAuthenticated: true, user: atolUser() }
+const authedSession: AtolSession = atolSession()
 
 /** A deterministic 32-byte "DEK" the core would have derived. */
 function fakeDEK(): Uint8Array {

@@ -15,28 +15,33 @@ const user: AtolUser = {
   email: 'remi@example.test',
   emailVerified: true,
   name: 'Remi',
-  orgId: 'org-1',
-  plan: 'pro',
-  roles: ['admin'],
   authMethod: 'oidc',
   mfaVerified: true,
 }
 
 function ctx(overrides: Partial<AtolContextValue> = {}): AtolContextValue {
-  return {
+  const base: AtolContextValue = {
     isLoading: false,
     isAuthenticated: true,
     user,
+    organizationId: '01KV4BNVVNZ4TNY0PP0CVXPZWP',
     error: null,
     permissions: new Map([['edit:publication', true]]),
     permissionsError: null,
     encryptionKey: null,
+    encryptionError: null,
     login: vi.fn().mockResolvedValue(undefined),
+    selectOrganization: vi.fn().mockResolvedValue({
+      isAuthenticated: true,
+      user,
+      organizationId: '01KV4BNVVNZ4TNY0PP0CVXPZWP',
+    }),
     logout: vi.fn().mockResolvedValue(undefined),
     getAccessToken: vi.fn().mockResolvedValue('at'),
     forceRenew: vi.fn().mockResolvedValue('at'),
-    ...overrides,
+    signDPoPProof: vi.fn().mockResolvedValue(undefined),
   }
+  return { ...base, ...overrides }
 }
 
 function renderWith(value: AtolContextValue, ui: React.ReactNode) {

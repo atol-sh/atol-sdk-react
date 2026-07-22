@@ -32,6 +32,7 @@ export { LoginButton, LogoutButton } from './components/auth-buttons'
 // Types
 export type {
   AtolConfig,
+  AtolSession,
   AtolUser,
   AtolState,
   AtolActions,

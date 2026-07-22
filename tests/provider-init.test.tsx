@@ -20,7 +20,7 @@ import * as React from 'react'
 import type { AtolSession, TokenResponse } from '@atol-sh/js'
 import { makeFakeAuth, type FakeAuth } from './fake-auth'
 import { makeIDToken } from './helpers'
-import { atolUser } from './fixtures'
+import { atolSession, atolUser, ORGANIZATION_ID } from './fixtures'
 
 let fake: FakeAuth
 // Overridable factory: each createAtolBrowserAuth() call routes here so a
@@ -65,7 +65,9 @@ function renderProvider(onState: (s: Snapshot) => void, useRefreshTokens = false
   )
 }
 
-const authedSession: AtolSession = { isAuthenticated: true, user: atolUser() }
+const authedSession: AtolSession = atolSession()
+const OTHER_ORGANIZATION_ID = '01KV4BNVMVG66Q04WGMMD6W4PB'
+const THIRD_ORGANIZATION_ID = '01KV4BNVMPYVAA6Q88CXJKSZJM'
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/')
@@ -96,13 +98,17 @@ describe('AtolProvider init', () => {
 
     await waitFor(() => expect(latest!.isLoading).toBe(false))
     expect(latest!.isAuthenticated).toBe(true)
+    expect(latest!.organizationId).toBe(ORGANIZATION_ID)
     expect(latest!.user).toMatchObject({
       id: 'user-1',
       email: 'remi@example.test',
-      orgId: 'org-1',
-      plan: 'pro',
-      roles: ['admin'],
+      name: 'Remi',
+      authMethod: 'oidc',
+      mfaVerified: true,
     })
+    expect(latest!.user).not.toHaveProperty('orgId')
+    expect(latest!.user).not.toHaveProperty('plan')
+    expect(latest!.user).not.toHaveProperty('roles')
     expect(latest!.error).toBeNull()
   })
 
@@ -162,6 +168,104 @@ describe('AtolProvider init', () => {
     const token = await latest!.getAccessToken()
     expect(token).toBe('at_from_client')
     expect(fake.spies.getAccessToken).toHaveBeenCalled()
+  })
+
+  it('selects an organization through the core atomic credential operation', async () => {
+    fake = makeFakeAuth({
+      initialSession: authedSession,
+      accessToken: 'at_first',
+      idToken: makeIDToken(),
+    })
+    fake.selectOrganization = vi.fn(async (organizationId: string) => {
+      const selected = atolSession({ organizationId })
+      fake.emit(selected)
+      return selected
+    })
+
+    let latest: Snapshot | null = null
+    renderProvider((s) => (latest = s))
+    await waitFor(() => expect(latest!.organizationId).toBe(ORGANIZATION_ID))
+
+    expect(latest!.selectOrganization).toBeTypeOf('function')
+    let selected: AtolSession | undefined
+    await act(async () => {
+      selected = await latest!.selectOrganization(OTHER_ORGANIZATION_ID)
+    })
+
+    expect(fake.selectOrganization).toHaveBeenCalledWith(OTHER_ORGANIZATION_ID)
+    expect(selected!.organizationId).toBe(OTHER_ORGANIZATION_ID)
+    expect(latest!.organizationId).toBe(OTHER_ORGANIZATION_ID)
+  })
+
+  it('preserves the current organization when core selection rejects', async () => {
+    fake = makeFakeAuth({
+      initialSession: authedSession,
+      accessToken: 'at_first',
+      idToken: makeIDToken(),
+    })
+    fake.selectOrganization = vi
+      .fn()
+      .mockRejectedValue(new Error('organization selection denied'))
+
+    let latest: Snapshot | null = null
+    renderProvider((s) => (latest = s))
+    await waitFor(() => expect(latest!.organizationId).toBe(ORGANIZATION_ID))
+
+    expect(latest!.selectOrganization).toBeTypeOf('function')
+    await expect(
+      latest!.selectOrganization(OTHER_ORGANIZATION_ID),
+    ).rejects.toThrow('organization selection denied')
+    expect(latest!.organizationId).toBe(ORGANIZATION_ID)
+  })
+
+  it('keeps the latest intent when competing organization selections settle out of order', async () => {
+    fake = makeFakeAuth({
+      initialSession: authedSession,
+      accessToken: 'at_first',
+      idToken: makeIDToken(),
+    })
+    let rejectFirst: ((reason: Error) => void) | undefined
+    let resolveSecond: ((session: AtolSession) => void) | undefined
+    fake.selectOrganization = vi.fn((organizationId: string) => {
+      if (organizationId === OTHER_ORGANIZATION_ID) {
+        return new Promise<AtolSession>((_resolve, reject) => {
+          rejectFirst = reject
+        })
+      }
+      return new Promise<AtolSession>((resolve) => {
+        resolveSecond = resolve
+      })
+    })
+
+    let latest: Snapshot | null = null
+    renderProvider((s) => (latest = s))
+    await waitFor(() => expect(latest!.organizationId).toBe(ORGANIZATION_ID))
+
+    expect(latest!.selectOrganization).toBeTypeOf('function')
+    const first = latest!.selectOrganization(OTHER_ORGANIZATION_ID)
+    const second = latest!.selectOrganization(THIRD_ORGANIZATION_ID)
+    const firstRejected = expect(first).rejects.toThrow('stale organization selection')
+
+    const latestSession = atolSession({ organizationId: THIRD_ORGANIZATION_ID })
+    await act(async () => {
+      fake.emit(latestSession)
+      resolveSecond!(latestSession)
+      await second
+    })
+    await act(async () => {
+      rejectFirst!(new Error('stale organization selection'))
+      await firstRejected
+    })
+
+    expect(fake.selectOrganization).toHaveBeenNthCalledWith(
+      1,
+      OTHER_ORGANIZATION_ID,
+    )
+    expect(fake.selectOrganization).toHaveBeenNthCalledWith(
+      2,
+      THIRD_ORGANIZATION_ID,
+    )
+    expect(latest!.organizationId).toBe(THIRD_ORGANIZATION_ID)
   })
 
   it('fires onLogin once when a session becomes authenticated', async () => {

@@ -206,6 +206,7 @@ export function AtolProvider({
 }: AtolProviderProps) {
   const [isLoading, setIsLoading] = useState(true)
   const [user, setUser] = useState<AtolUser | null>(null)
+  const [organizationId, setOrganizationId] = useState<string | null>(null)
   const [error, setError] = useState<Error | null>(null)
   const [permissions, setPermissions] = useState<Map<string, boolean>>(new Map())
   const [permissionsError, setPermissionsError] = useState<Error | null>(null)
@@ -231,6 +232,10 @@ export function AtolProvider({
   // callbacks read this ref only after mount, by which point the effect has
   // populated it.
   const authRef = useRef<AtolBrowserAuth | null>(null)
+  // Every session change advances this epoch. Manual logout advances it
+  // synchronously before awaiting the core so deferred credential work can
+  // never repopulate state after the user has chosen to sign out.
+  const sessionEpochRef = useRef(0)
 
   // Mirror volatile state/props into refs so the stable callbacks below can
   // read current values without listing them in dep arrays (which would
@@ -241,50 +246,78 @@ export function AtolProvider({
   callbacksRef.current = { onLogin, onLogout, onPermissionsError }
 
   /**
-   * DPoP signer adapter for `loadPermissions`. When DPoP is active the
-   * batch-check call must present the token under the `DPoP` auth scheme
-   * with an `ath`-bound proof; the core's `signDPoPProof` produces exactly
-   * that (fetching a fresh token so `ath` binds to what is presented).
-   * Passed to loadPermissions only when DPoP is active; otherwise the call
-   * runs plain Bearer.
-   */
-  const permissionDPoPSigner = useMemo<DPoPSigner>(
-    () => ({
-      async signProof(method: string, url: string): Promise<string> {
-        const result = await authRef.current?.signDPoPProof(method, url)
-        // signDPoPProof only omits the proof when DPoP is inactive; this
-        // signer is only wired in when it IS active, so the proof exists.
-        return result?.proof ?? ''
-      },
-    }),
-    [],
-  )
-
-  /**
    * (Re)load permissions for the current identity. Called on initial login
    * AND on every token renewal (via onSessionChange) so a server-side
    * grant/revocation is picked up within the session. Deny-by-default holds
-   * while the load is in flight and on failure (the map is left empty /
-   * replaced only on success).
+   * while the load is in flight and on failure (the map is cleared before
+   * each credential transition and replaced only on success).
    */
   const reloadPermissions = useCallback(
-    async (atolUser: AtolUser, token: string): Promise<void> => {
+    async (
+      atolUser: AtolUser,
+      credentialOrganizationId: string | undefined,
+      token: string | undefined,
+      isCurrent: () => boolean,
+    ): Promise<void> => {
       const checks = permissionChecksRef.current
       if (checks.length === 0) return
       try {
+        if (!credentialOrganizationId) {
+          throw new Error(
+            'Cannot load permissions: the current credential is not scoped to an organization',
+          )
+        }
+        if (!token) {
+          throw new Error(
+            'Cannot load permissions: the authenticated session has no access token',
+          )
+        }
+        let dpop: DPoPSigner | undefined
+        if (authRef.current?.isDPoPActive()) {
+          const expectedAccessToken = token
+          dpop = {
+            async signProof(method, url, options): Promise<string> {
+              if (options?.accessToken !== expectedAccessToken) {
+                throw new Error(
+                  'Cannot load permissions: DPoP signer received a different access token',
+                )
+              }
+              // Resolve the token and its proof atomically from the core.
+              // If an organization transition committed since this load
+              // captured its token, reject before loadPermissions reaches
+              // fetch rather than pairing token A with a proof for token B.
+              const result = await authRef.current?.getAccessToken({
+                dpop: { method, url },
+              })
+              if (!result?.proof) {
+                throw new Error(
+                  'Cannot load permissions: DPoP proof is unavailable',
+                )
+              }
+              if (result.token !== expectedAccessToken) {
+                throw new Error(
+                  'Cannot load permissions: credential changed while producing the DPoP proof',
+                )
+              }
+              return result.proof
+            },
+          }
+        }
         const perms = await loadPermissions({
           apiUrl,
           keyId,
           accessToken: token,
           userId: atolUser.id,
-          orgId: atolUser.orgId,
+          orgId: credentialOrganizationId,
           checks,
-          dpop: authRef.current?.isDPoPActive() ? permissionDPoPSigner : undefined,
+          dpop,
         })
+        if (!isCurrent()) return
         setPermissions(perms)
         setPermissionsError(null)
       } catch (err) {
-        // Deny-by-default stays in force (the permission map is unchanged),
+        if (!isCurrent()) return
+        // Deny-by-default stays in force (the permission map was cleared),
         // but the failure is surfaced so the app can tell "no permissions"
         // apart from "failed to load".
         const permErr = err instanceof Error ? err : new Error(String(err))
@@ -293,12 +326,12 @@ export function AtolProvider({
         callbacksRef.current.onPermissionsError?.(permErr)
       }
     },
-    [apiUrl, keyId, permissionDPoPSigner],
+    [apiUrl, keyId],
   )
 
   /**
    * Own the auth session for the provider's lifetime. Subscribe to the core
-   * client's session changes (login, logout, renewal, cross-tab rotation)
+   * client's session changes (login, logout, renewal, cross-tab revalidation)
    * and mirror them into React state, layering permission loading on each
    * change and mirroring the core-derived encryption key/error. Then init()
    * the client (handles a redirect callback or a silent restore). Runs once
@@ -362,14 +395,31 @@ export function AtolProvider({
     }
     authRef.current = auth
     let cancelled = false
+    let sessionWasAuthenticated = false
     // Track identity so callbacks fire once per login/logout transition,
     // not on every proactive token renewal.
     let lastUserId: string | null = null
 
     async function onSession(session: AtolSession): Promise<void> {
       if (cancelled) return
+      const epoch = ++sessionEpochRef.current
+      const isCurrent = () => !cancelled && epoch === sessionEpochRef.current
       const atolUser = session.user
+      const wasAuthenticated = sessionWasAuthenticated
+      sessionWasAuthenticated = atolUser !== null
+      const credentialOrganizationId = atolUser ? session.organizationId : undefined
       setUser(atolUser)
+      setOrganizationId(credentialOrganizationId ?? null)
+      setAccessToken(undefined)
+      // A permission result is valid only for the exact credential context
+      // that produced it. Clear it before resolving the new token/scope so a
+      // failed or superseded organization transition cannot retain grants
+      // from the previous organization.
+      setPermissions(new Map())
+      setPermissionsError(null)
+      if (!atolUser && wasAuthenticated) {
+        callbacksRef.current.onLogout?.()
+      }
 
       // Mirror the core-derived zero-knowledge key/error into React state on
       // every session change. The core owns derivation (provision on a fresh
@@ -384,12 +434,19 @@ export function AtolProvider({
 
       if (atolUser) {
         const res = await auth.getAccessToken()
+        if (!isCurrent()) return
         const token = res?.token
         setAccessToken(token)
 
         // Permissions are tied to identity; refresh on every renewal so
         // grants/revocations take effect mid-session.
-        if (token) await reloadPermissions(atolUser, token)
+        await reloadPermissions(
+          atolUser,
+          credentialOrganizationId,
+          token,
+          isCurrent,
+        )
+        if (!isCurrent()) return
 
         if (atolUser.id !== lastUserId) {
           lastUserId = atolUser.id
@@ -400,7 +457,7 @@ export function AtolProvider({
         if (lastUserId !== null) {
           lastUserId = null
           // A session drop from the core (terminal renewal failure /
-          // cross-tab session-expired) resets local derived state. The core
+          // cross-tab session-ended) resets local derived state. The core
           // already cleared its own encryption key; the mirror above (with
           // the now-empty session) reflects that, and permissions reset here.
           setPermissions(new Map())
@@ -473,17 +530,27 @@ export function AtolProvider({
     [],
   )
 
+  const selectOrganization = useCallback(
+    async (organizationId: string): Promise<AtolSession> => {
+      const auth = authRef.current
+      if (!auth) throw new Error('AtolProvider is not mounted')
+      return auth.selectOrganization(organizationId)
+    },
+    [],
+  )
+
   const logout = useCallback(async () => {
     // Reset the React-derived state first; the core client handles refresh-
     // token revocation, RP-initiated end_session (with id_token_hint), AND
     // clearing the zero-knowledge key + wiping the device-bound KEK vault.
+    sessionEpochRef.current++
     setUser(null)
+    setOrganizationId(null)
     setAccessToken(undefined)
     setPermissions(new Map())
     setPermissionsError(null)
     setEncryptionKey(null)
     setEncryptionError(null)
-    callbacksRef.current.onLogout?.()
     await authRef.current!.logout()
   }, [])
 
@@ -516,12 +583,14 @@ export function AtolProvider({
       isLoading,
       isAuthenticated: user !== null,
       user,
+      organizationId,
       error,
       permissions,
       permissionsError,
       encryptionKey,
       encryptionError,
       login,
+      selectOrganization,
       logout,
       getAccessToken,
       forceRenew,
@@ -530,12 +599,14 @@ export function AtolProvider({
     [
       isLoading,
       user,
+      organizationId,
       error,
       permissions,
       permissionsError,
       encryptionKey,
       encryptionError,
       login,
+      selectOrganization,
       logout,
       getAccessToken,
       forceRenew,

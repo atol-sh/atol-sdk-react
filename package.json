@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/react",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Atol React SDK — authentication and frontend authorization",
   "license": "Apache-2.0",
   "type": "module",
@@ -46,7 +46,7 @@
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.tests.json",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
@@ -57,7 +57,7 @@
   },
   "author": "Atol",
   "dependencies": {
-    "@atol-sh/js": "^0.1.2",
+    "@atol-sh/js": "^0.2.0",
     "jose": "^5.10.0",
     "oidc-client-ts": "^3.3.0"
   },

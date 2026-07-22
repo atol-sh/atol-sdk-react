@@ -7,7 +7,7 @@ import type { AtolUser } from '../types'
  *
  * ```tsx
  * const user = useUser()
- * // user?.orgId, user?.plan, user?.roles, etc.
+ * // user?.id, user?.email, user?.name, etc.
  * ```
  */
 export function useUser(): AtolUser | null {

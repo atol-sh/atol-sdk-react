@@ -6,6 +6,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
+### Changed
+
+- Organization scope is exposed as `useAtol().organizationId`, sourced from
+  the core client's atomic `AtolSession` credential context instead of
+  `AtolUser` profile data.
+- `AtolUser` no longer exposes organization, plan, or role fields.
+- `useAtol().selectOrganization(organizationId)` delegates to the core
+  client's atomic credential transaction and returns its verified session.
+- Type checking now covers tests and fakes as well as production source.
+- Requires `@atol-sh/js` `^0.2.0` for grant-bound organization selection,
+  strict callback/access-token verification, and lifecycle-safe commits.
+
+### Fixed
+
+- Configured permission checks now fail closed without calling AccessService
+  when the current credential is not scoped to an organization. Permission
+  results are cleared before every credential transition so a prior
+  organization's grants cannot survive a failed or superseded reload.
+- DPoP permission loads reject before fetch if an organization transition
+  changes the token while its proof is being produced, preventing a token-A
+  request from carrying a proof bound to token B.
+- Starting manual logout synchronously invalidates deferred session work, so
+  late permission results cannot restore grants or fire `onLogin`.
+- `onLogout` now fires exactly once for both manual and passive authenticated
+  to unauthenticated transitions.
+
 ## [0.3.3] - 2026-07-19
 
 ### Fixed

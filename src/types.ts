@@ -1,15 +1,23 @@
 import type { DeviceConfig, DeviceState } from './device/types'
 
-// Shared, framework-agnostic types are owned by the core. Re-exported here
-// so the SDK's public type surface is unchanged for consumers.
+// Shared, framework-agnostic types are owned by the core and re-exported
+// here so React consumers use the exact credential/session contracts.
 import type {
+  AtolSession,
   AtolUser,
   PermissionCheck,
   PermissionResult,
   DPoPProofResult,
   TokenResponse,
 } from '@atol-sh/js'
-export type { AtolUser, PermissionCheck, PermissionResult, DPoPProofResult, TokenResponse }
+export type {
+  AtolSession,
+  AtolUser,
+  PermissionCheck,
+  PermissionResult,
+  DPoPProofResult,
+  TokenResponse,
+}
 
 /** Configuration for the AtolProvider. */
 export interface AtolConfig {
@@ -43,7 +51,7 @@ export interface AtolConfig {
   /** Called after successful login + permission load. */
   onLogin?: (user: AtolUser) => void
 
-  /** Called after logout. */
+  /** Called once whenever an authenticated session ends, including passively. */
   onLogout?: () => void
 
   /**
@@ -134,6 +142,15 @@ export interface AtolState {
   isLoading: boolean
   isAuthenticated: boolean
   user: AtolUser | null
+
+  /**
+   * Organization bound to the current access/ID-token credential pair.
+   * Null for an unauthenticated or management-realm session that has not
+   * selected an organization. This is credential context, not user profile
+   * data, and may change while `user` remains the same.
+   */
+  organizationId: string | null
+
   error: Error | null
   permissions: Map<string, boolean>
 
@@ -161,6 +178,15 @@ export interface AtolState {
 /** Auth methods exposed by the provider. */
 export interface AtolActions {
   login: (options?: { returnTo?: string }) => Promise<void>
+
+  /**
+   * Atomically replace the current credential pair with one scoped to the
+   * requested organization. The previous credential remains active if the
+   * core operation rejects. Competing calls follow the core client's latest
+   * credential-transaction intent.
+   */
+  selectOrganization: (organizationId: string) => Promise<AtolSession>
+
   /**
    * Sign out via OIDC RP-Initiated Logout. Async because the SDK first
    * looks up the current ID token to include as `id_token_hint`. The

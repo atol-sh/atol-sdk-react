@@ -11,12 +11,11 @@
  * to drive the success/failure branches.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
-import * as React from 'react'
+import { act, render, waitFor } from '@testing-library/react'
 import type { AtolSession } from '@atol-sh/js'
 import { makeFakeAuth, type FakeAuth } from './fake-auth'
 import { makeIDToken } from './helpers'
-import { atolUser } from './fixtures'
+import { atolSession, atolUser, ORGANIZATION_ID } from './fixtures'
 
 let fake: FakeAuth
 
@@ -41,7 +40,8 @@ import { usePermissions } from '../src/hooks/use-permissions'
 import { loadPermissions } from '../src/lib/permissions'
 
 const mockLoad = vi.mocked(loadPermissions)
-const authedSession: AtolSession = { isAuthenticated: true, user: atolUser() }
+const OTHER_ORGANIZATION_ID = '01KV4BNVMVG66Q04WGMMD6W4PB'
+const authedSession: AtolSession = atolSession()
 
 type PermSnapshot = ReturnType<typeof usePermissions>
 
@@ -51,7 +51,7 @@ function Harness({ onState }: { onState: (s: PermSnapshot) => void }) {
 }
 
 function renderProvider(
-  opts: { onPermissionsError?: (e: Error) => void },
+  opts: { onPermissionsError?: (e: Error) => void; useDPoP?: boolean },
   onState: (s: PermSnapshot) => void,
 ) {
   return render(
@@ -61,6 +61,7 @@ function renderProvider(
       redirectUri="https://app.test/cb"
       permissions={[{ action: 'edit', resource: 'publication' }]}
       onPermissionsError={opts.onPermissionsError}
+      useDPoP={opts.useDPoP}
     >
       <Harness onState={onState} />
     </AtolProvider>,
@@ -93,8 +94,162 @@ describe('permission loading', () => {
     expect(latest!.error).toBeNull()
     // The load used the token the client handed back.
     expect(mockLoad).toHaveBeenCalledWith(
-      expect.objectContaining({ accessToken: 'at_perm', userId: 'user-1', orgId: 'org-1' }),
+      expect.objectContaining({
+        accessToken: 'at_perm',
+        userId: 'user-1',
+        orgId: ORGANIZATION_ID,
+      }),
     )
+  })
+
+  it('fails closed without calling AccessService when the credential is unscoped', async () => {
+    fake = makeFakeAuth({
+      initialSession: { isAuthenticated: true, user: atolUser() },
+      accessToken: 'at_unscoped',
+      idToken: makeIDToken({ 'atol:org_id': undefined }),
+    })
+    const onPermissionsError = vi.fn()
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    let latest: PermSnapshot | null = null
+    renderProvider({ onPermissionsError }, (s) => (latest = s))
+
+    await waitFor(() => expect(latest!.error).toBeInstanceOf(Error))
+    expect(latest!.can('edit', 'publication')).toBe(false)
+    expect(mockLoad).not.toHaveBeenCalled()
+    expect(onPermissionsError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('not scoped to an organization'),
+      }),
+    )
+    consoleSpy.mockRestore()
+  })
+
+  it('clears previously granted permissions when the credential becomes unscoped', async () => {
+    mockLoad.mockResolvedValue(new Map([['edit:publication', true]]))
+    const onPermissionsError = vi.fn()
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    let latest: PermSnapshot | null = null
+    renderProvider({ onPermissionsError }, (s) => (latest = s))
+    await waitFor(() => expect(latest!.can('edit', 'publication')).toBe(true))
+    const scopedLoadCount = mockLoad.mock.calls.length
+
+    await act(async () => {
+      fake.emit({ isAuthenticated: true, user: atolUser() })
+    })
+
+    await waitFor(() => expect(latest!.error).toBeInstanceOf(Error))
+    expect(latest!.can('edit', 'publication')).toBe(false)
+    expect(mockLoad).toHaveBeenCalledTimes(scopedLoadCount)
+    consoleSpy.mockRestore()
+  })
+
+  it('does not apply a stale permission response after the organization changes', async () => {
+    fake = makeFakeAuth()
+    let resolveFirst: ((permissions: Map<string, boolean>) => void) | undefined
+    mockLoad.mockImplementation(({ orgId }) => {
+      if (orgId === ORGANIZATION_ID) {
+        return new Promise((resolve) => {
+          resolveFirst = resolve
+        })
+      }
+      return Promise.resolve(new Map([['edit:publication', false]]))
+    })
+
+    let latest: PermSnapshot | null = null
+    renderProvider({}, (s) => (latest = s))
+
+    await act(async () => {
+      fake.authenticate(atolUser(), {
+        accessToken: 'at_first',
+        organizationId: ORGANIZATION_ID,
+      })
+    })
+    await waitFor(() => expect(resolveFirst).toBeTypeOf('function'))
+
+    await act(async () => {
+      fake.authenticate(atolUser(), {
+        accessToken: 'at_second',
+        organizationId: OTHER_ORGANIZATION_ID,
+      })
+    })
+    await waitFor(() =>
+      expect(mockLoad).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: OTHER_ORGANIZATION_ID }),
+      ),
+    )
+    expect(latest!.can('edit', 'publication')).toBe(false)
+
+    await act(async () => {
+      resolveFirst!(new Map([['edit:publication', true]]))
+    })
+    expect(latest!.can('edit', 'publication')).toBe(false)
+  })
+
+  it('never sends token A with a DPoP proof resolved after switching to organization B', async () => {
+    fake = makeFakeAuth({ dpopActive: true })
+    let releaseFirstProof: (() => void) | undefined
+    const firstProofGate = new Promise<void>((resolve) => {
+      releaseFirstProof = resolve
+    })
+    let markFirstSettled: (() => void) | undefined
+    const firstSettled = new Promise<void>((resolve) => {
+      markFirstSettled = resolve
+    })
+    let firstLoadStarted = false
+    let firstRequestSent = false
+
+    mockLoad.mockImplementation(async (opts) => {
+      if (opts.orgId !== ORGANIZATION_ID) {
+        return new Map([['edit:publication', false]])
+      }
+      firstLoadStarted = true
+      try {
+        await firstProofGate
+        expect(opts.dpop).toBeDefined()
+        await opts.dpop!.signProof('POST', 'https://api.atol.test/permissions', {
+          accessToken: opts.accessToken,
+        })
+        // Models the fetch boundary inside loadPermissions: no request may
+        // pass this point if the proof was produced for a different token.
+        firstRequestSent = true
+        return new Map([['edit:publication', true]])
+      } finally {
+        markFirstSettled!()
+      }
+    })
+
+    let latest: PermSnapshot | null = null
+    renderProvider({ useDPoP: true }, (s) => (latest = s))
+
+    await act(async () => {
+      fake.authenticate(atolUser(), {
+        accessToken: 'token-a',
+        organizationId: ORGANIZATION_ID,
+      })
+    })
+    await waitFor(() => expect(firstLoadStarted).toBe(true))
+
+    await act(async () => {
+      fake.authenticate(atolUser(), {
+        accessToken: 'token-b',
+        organizationId: OTHER_ORGANIZATION_ID,
+      })
+    })
+    await waitFor(() =>
+      expect(mockLoad).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accessToken: 'token-b',
+          orgId: OTHER_ORGANIZATION_ID,
+        }),
+      ),
+    )
+
+    releaseFirstProof!()
+    await firstSettled
+    expect(firstRequestSent).toBe(false)
+    expect(latest!.can('edit', 'publication')).toBe(false)
   })
 
   it('denies all and surfaces the failure when the bulk load throws', async () => {

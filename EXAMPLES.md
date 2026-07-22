@@ -40,7 +40,17 @@ dedicated `/callback` route needed.
 import { useAtol } from '@atol-sh/react'
 
 function LoginPanel() {
-  const { isLoading, isAuthenticated, user, error, login, logout, getAccessToken } = useAtol()
+  const {
+    isLoading,
+    isAuthenticated,
+    user,
+    organizationId,
+    error,
+    login,
+    selectOrganization,
+    logout,
+    getAccessToken,
+  } = useAtol()
 
   if (isLoading) return <p>Loading...</p>
   if (error) return <p>Auth error: {error.message}</p>
@@ -59,6 +69,10 @@ function LoginPanel() {
   return (
     <div>
       <p>Signed in as {user!.email}</p>
+      <p>Credential organization: {organizationId ?? 'none selected'}</p>
+      <button onClick={() => selectOrganization('01KV4BNVVNZ4TNY0PP0CVXPZWP')}>
+        Use organization
+      </button>
       <button onClick={callApi}>Call API</button>
       <button onClick={() => logout()}>Sign out</button>
     </div>

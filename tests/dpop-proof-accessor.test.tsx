@@ -17,7 +17,7 @@ import { render, waitFor } from '@testing-library/react'
 import type { AtolSession } from '@atol-sh/js'
 import { makeFakeAuth, type FakeAuth } from './fake-auth'
 import { makeIDToken } from './helpers'
-import { atolUser } from './fixtures'
+import { atolSession } from './fixtures'
 
 let fake: FakeAuth
 
@@ -37,7 +37,7 @@ vi.mock('../src/lib/permissions', () => ({
 import { AtolProvider } from '../src/provider'
 import { useAtol } from '../src/hooks/use-atol'
 
-const authedSession: AtolSession = { isAuthenticated: true, user: atolUser() }
+const authedSession: AtolSession = atolSession()
 
 type Snapshot = ReturnType<typeof useAtol>
 

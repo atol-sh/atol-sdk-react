@@ -16,6 +16,7 @@ export function makeJWT(payload: Record<string, unknown>): string {
 export function makeAccessToken(inSeconds = 3600): string {
   return makeJWT({
     sub: 'user-1',
+    'atol:org_id': '01KV4BNVVNZ4TNY0PP0CVXPZWP',
     exp: Math.floor(Date.now() / 1000) + inSeconds,
   })
 }
@@ -27,9 +28,7 @@ export function makeIDToken(overrides: Record<string, unknown> = {}): string {
     email: 'remi@example.test',
     email_verified: true,
     name: 'Remi',
-    'atol:org_id': 'org-1',
-    'atol:plan': 'pro',
-    'atol:roles': ['admin'],
+    'atol:org_id': '01KV4BNVVNZ4TNY0PP0CVXPZWP',
     'atol:auth_method': 'oidc',
     'atol:mfa_verified': true,
     exp: Math.floor(Date.now() / 1000) + 3600,

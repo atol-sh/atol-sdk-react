@@ -5,12 +5,16 @@ const defaultContext: AtolContextValue = {
   isLoading: true,
   isAuthenticated: false,
   user: null,
+  organizationId: null,
   error: null,
   permissions: new Map(),
   permissionsError: null,
   encryptionKey: null,
   encryptionError: null,
   login: async () => {
+    throw new Error('AtolProvider not mounted')
+  },
+  selectOrganization: async () => {
     throw new Error('AtolProvider not mounted')
   },
   logout: async () => {

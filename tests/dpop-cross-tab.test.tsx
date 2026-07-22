@@ -1,16 +1,14 @@
 /**
- * Cross-tab token rotation.
+ * Cross-tab credential invalidation.
  *
- * The cross-tab broadcast (leader rotates -> followers adopt) and its
- * DPoP-safety rule (drop the leader's key-bound refresh token so a
- * follower's own key keeps renewing) now live ENTIRELY in the `@atol-sh/js`
- * browser-auth client -- the React provider no longer wires a
- * BroadcastChannel. That behavior (verify the broadcast ID token, pin the
- * subject, drop the RT under DPoP, adopt the access token for freshness) is
- * covered by @atol-sh/js's browser-auth.test.ts "cross-tab broadcast" suite.
+ * The signal-only BroadcastChannel and its DPoP-safety rule live entirely in
+ * the `@atol-sh/js` browser-auth client: tabs never adopt another tab's
+ * access, ID, or refresh token. A credential-invalidation message instead
+ * causes each tab to renew with its own key. That behavior is covered by
+ * @atol-sh/js's browser-auth.test.ts cross-tab suite.
  *
- * At the provider level, a cross-tab rotation reaches the app the same way
- * any renewal does: the client emits a new session via onSessionChange.
+ * At the provider level, an invalidation-driven local renewal reaches the app
+ * the same way any renewal does: the client emits a new session.
  * These tests assert the PROVIDER's observable reaction -- it mirrors the
  * rotated session into React state and re-loads permissions -- under both
  * DPoP-on and DPoP-off configurations.
@@ -20,7 +18,7 @@ import { act, render, waitFor } from '@testing-library/react'
 import type { AtolSession } from '@atol-sh/js'
 import { makeFakeAuth, type FakeAuth } from './fake-auth'
 import { makeIDToken } from './helpers'
-import { atolUser } from './fixtures'
+import { atolSession, atolUser, ORGANIZATION_ID } from './fixtures'
 
 let fake: FakeAuth
 
@@ -42,7 +40,7 @@ import { useAtol } from '../src/hooks/use-atol'
 import { loadPermissions } from '../src/lib/permissions'
 
 const mockLoad = vi.mocked(loadPermissions)
-const authedSession: AtolSession = { isAuthenticated: true, user: atolUser() }
+const authedSession: AtolSession = atolSession()
 
 type Snapshot = ReturnType<typeof useAtol>
 
@@ -74,7 +72,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('cross-tab rotation reflected by the provider', () => {
+describe('cross-tab revalidation reflected by the provider', () => {
   it('mirrors a rotated session and reloads permissions (DPoP on)', async () => {
     fake = makeFakeAuth({
       initialSession: authedSession,
@@ -89,16 +87,20 @@ describe('cross-tab rotation reflected by the provider', () => {
     await waitFor(() => expect(latest!.permissions.get('edit:publication')).toBe(true))
     const loadsBefore = mockLoad.mock.calls.length
 
-    // A leader tab rotated tokens; the client surfaces the fresh session.
+    // This tab renewed after an invalidation signal; the client surfaces it.
     await act(async () => {
-      fake.authenticate(atolUser(), { accessToken: 'at_2', idToken: makeIDToken() })
+      fake.authenticate(atolUser(), {
+        accessToken: 'at_2',
+        idToken: makeIDToken(),
+        organizationId: ORGANIZATION_ID,
+      })
     })
 
     // Provider stays authenticated and re-loads permissions on the rotation.
     expect(latest!.isAuthenticated).toBe(true)
     await waitFor(() => expect(mockLoad.mock.calls.length).toBeGreaterThan(loadsBefore))
     // The reload used the DPoP signer (DPoP active).
-    const lastCall = mockLoad.mock.calls.at(-1)![0]
+    const lastCall = mockLoad.mock.calls[mockLoad.mock.calls.length - 1][0]
     expect(lastCall.dpop).toBeTruthy()
   })
 
@@ -116,13 +118,17 @@ describe('cross-tab rotation reflected by the provider', () => {
     const loadsBefore = mockLoad.mock.calls.length
 
     await act(async () => {
-      fake.authenticate(atolUser(), { accessToken: 'at_2', idToken: makeIDToken() })
+      fake.authenticate(atolUser(), {
+        accessToken: 'at_2',
+        idToken: makeIDToken(),
+        organizationId: ORGANIZATION_ID,
+      })
     })
 
     expect(latest!.isAuthenticated).toBe(true)
     await waitFor(() => expect(mockLoad.mock.calls.length).toBeGreaterThan(loadsBefore))
     // Bearer mode: no DPoP signer passed to the permission load.
-    const lastCall = mockLoad.mock.calls.at(-1)![0]
+    const lastCall = mockLoad.mock.calls[mockLoad.mock.calls.length - 1][0]
     expect(lastCall.dpop).toBeUndefined()
   })
 })

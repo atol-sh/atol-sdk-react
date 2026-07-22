@@ -9,7 +9,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
-import * as React from 'react'
 import { DeviceProvider } from '../src/device/DeviceProvider'
 import { useDevice } from '../src/device/use-device'
 import type { DeviceState } from '../src/device/types'

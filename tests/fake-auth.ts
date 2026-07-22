@@ -15,7 +15,7 @@
  * old internal-mock tests made maps onto an observable provider outcome.
  */
 import { vi } from 'vitest'
-import { parseAtolUser } from '@atol-sh/js'
+import { decodeJWTPayload, parseAtolUser } from '@atol-sh/js'
 import type {
   AtolBrowserAuth,
   AtolSession,
@@ -63,6 +63,7 @@ export interface FakeAuth extends AtolBrowserAuth {
     opts?: {
       accessToken?: string
       idToken?: string
+      organizationId?: string
       encryptionKey?: Uint8Array
       encryptionError?: Error
     },
@@ -80,6 +81,7 @@ export interface FakeAuth extends AtolBrowserAuth {
   spies: {
     init: ReturnType<typeof vi.fn>
     beginLogin: ReturnType<typeof vi.fn>
+    selectOrganization: ReturnType<typeof vi.fn>
     logout: ReturnType<typeof vi.fn>
     forceRenew: ReturnType<typeof vi.fn>
     getAccessToken: ReturnType<typeof vi.fn>
@@ -108,6 +110,7 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
   const spies = {
     init: vi.fn(),
     beginLogin: vi.fn().mockResolvedValue(undefined),
+    selectOrganization: vi.fn(),
     logout: vi.fn().mockResolvedValue(undefined),
     forceRenew: vi.fn(),
     getAccessToken: vi.fn(),
@@ -139,6 +142,15 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
     beginLogin: spies.beginLogin,
     stepUp: vi.fn().mockResolvedValue(undefined),
     completeLogin: vi.fn().mockImplementation(async () => session),
+    selectOrganization: spies.selectOrganization.mockImplementation(
+      async (organizationId: string): Promise<AtolSession> => {
+        if (!session.user) {
+          throw new Error('cannot select an organization without a session')
+        }
+        emit({ ...session, organizationId })
+        return session
+      },
+    ),
     getAccessToken: spies.getAccessToken.mockImplementation(async () => proofResult()),
     getIdToken: () => idToken,
     getEncryptionKey: () => encKey,
@@ -167,7 +179,12 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
         if (tokens.id_token) idToken = tokens.id_token
         const user = tokens.id_token ? parseAtolUser(tokens.id_token) : null
         if (user?.id) {
-          emit({ isAuthenticated: true, user })
+          const claims = decodeJWTPayload(tokens.access_token)
+          const organizationId =
+            typeof claims['atol:org_id'] === 'string'
+              ? claims['atol:org_id']
+              : undefined
+          emit({ isAuthenticated: true, user, organizationId })
         }
         return session
       },
@@ -187,7 +204,11 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
       if (opts?.idToken !== undefined) idToken = opts.idToken
       if (opts?.encryptionKey !== undefined) encKey = opts.encryptionKey
       if (opts?.encryptionError !== undefined) encError = opts.encryptionError
-      emit({ isAuthenticated: true, user })
+      emit({
+        isAuthenticated: true,
+        user,
+        organizationId: opts?.organizationId ?? session.organizationId,
+      })
     },
     drop: () => {
       accessToken = undefined

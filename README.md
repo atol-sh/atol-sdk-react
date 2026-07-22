@@ -55,7 +55,7 @@ component is needed.
 import { useAtol, usePermissions, Can } from '@atol-sh/react'
 
 function Dashboard() {
-  const { isAuthenticated, user, login, logout } = useAtol()
+  const { isAuthenticated, user, organizationId, login, logout } = useAtol()
   const { can } = usePermissions()
 
   if (!isAuthenticated) {
@@ -64,7 +64,8 @@ function Dashboard() {
 
   return (
     <div>
-      <p>Welcome, {user.name} ({user.plan} plan)</p>
+      <p>Welcome, {user.name}</p>
+      <p>Active organization: {organizationId ?? 'none selected'}</p>
       <button onClick={logout}>Sign out</button>
 
       {can('edit', 'publication') && <EditButton />}
@@ -146,7 +147,7 @@ Mount once at the root of your app.
 | `audience` | `string` | No | API audience identifier |
 | `permissions` | `PermissionCheck[]` | No | Permissions to bulk-load at login |
 | `onLogin` | `(user: AtolUser) => void` | No | Called after successful login |
-| `onLogout` | `() => void` | No | Called after logout |
+| `onLogout` | `() => void` | No | Called once whenever an authenticated session ends, including a passive expiry/logout signal |
 | `onPermissionsError` | `(error: Error) => void` | No | Called when the bulk permission load fails (checks stay deny-by-default) |
 | `useRefreshTokens` | `boolean` | No | Renewal strategy. Default (`false`) renews via a hidden-iframe silent authorize against the IdP session cookie (`prompt=none`) and requests/stores no refresh token. The iframe path needs the IdP session cookie in a third-party context, which Safari ITP blocks and Chrome's third-party-cookie phase-out removes, so it fails **unconditionally** for a cross-site app (UI on a different registrable domain from the IdP). Such apps **must** set `true`: this appends `offline_access` and renews via the refresh-token grant. Same-site apps (UI on a subdomain of the IdP) reach the first-party cookie in the iframe and leave it `false`. Default: `false` |
 | `useRefreshTokensFallback` | `boolean` | No | On a transient refresh-grant failure, fall back to the iframe path once before surfacing the error. Default: `false` |
@@ -165,11 +166,13 @@ const {
   isLoading,        // true while OIDC is initializing
   isAuthenticated,  // true when user is logged in
   user,             // AtolUser | null
+  organizationId,   // string | null - organization bound to the credential
   error,            // Error | null
   encryptionKey,    // Uint8Array | null — unwrapped DEK (deriveEncryptionKey)
   encryptionError,  // Error | null — DEK could not be unwrapped (wrong KEK, tamper, vault error)
   device,           // DeviceState — device intelligence (see below)
   login,            // (options?: { returnTo?: string }) => Promise<void>
+  selectOrganization, // (organizationId: string) => Promise<AtolSession>
   logout,           // () => Promise<void>
   getAccessToken,   // () => Promise<string | undefined> — renews when stale
   forceRenew,       // () => Promise<string | undefined> — rotate now
@@ -177,12 +180,17 @@ const {
 ```
 
 `getAccessToken()` returns the current access token and silently renews
-it when it is within 60s of expiry. Renewal is single-flight per tab and
-coordinated across tabs (Web Locks + BroadcastChannel), so concurrent
-callers and concurrent tabs never race the token endpoint.
+it when it is within 60s of expiry. Renewal is single-flight per tab.
+Cross-tab messages carry invalidation or session-ended signals only; each
+tab renews locally so proof-bound access and refresh tokens never cross tabs.
 
 `forceRenew()` bypasses the freshness check and rotates immediately —
 useful when the server signals an out-of-band claim change.
+
+`selectOrganization(organizationId)` asks the core client for a distinct,
+organization-scoped credential transaction and resolves with the verified
+session. If selection fails, the previous credential and `organizationId`
+remain active. Competing selections preserve the core client's latest intent.
 
 > **Known gap:** step-up re-authentication (`stepUp`) exists on the
 > `@atol-sh/js` core client but is not yet exposed through `useAtol()`.
@@ -215,8 +223,12 @@ Convenience hook — returns just the user.
 
 ```typescript
 const user = useUser()
-// user?.id, user?.email, user?.orgId, user?.plan, user?.roles
+// user?.id, user?.email, user?.name, user?.authMethod
 ```
+
+Organization scope is credential state, not user profile data. Read
+`organizationId` from `useAtol()`; it is `null` when the current authenticated
+credential is not scoped to an organization.
 
 ### `<Can>`
 
@@ -317,9 +329,6 @@ interface AtolUser {
   email: string         // Email address
   emailVerified: boolean // email_verified claim
   name: string          // Display name
-  orgId: string         // Organization ID
-  plan: string          // Subscription plan (e.g. "pro")
-  roles: string[]       // Roles (e.g. ["admin", "editor"])
   authMethod: string    // How they authenticated (e.g. "oidc")
   mfaVerified: boolean  // MFA completed
 }
@@ -331,7 +340,8 @@ interface AtolUser {
 2. On login, the user is redirected to `auth.atol.sh` for authentication
 3. After redirect back, the SDK exchanges the code for tokens
 4. User info is parsed from JWT claims — no `/userinfo` API call needed
-5. Permissions are bulk-loaded in one batch call using the publishable key
+5. Permissions are bulk-loaded for the organization bound to the current
+   credential in one batch call using the publishable key
 6. `can()` / `cannot()` check permissions from the pre-loaded Map (synchronous, no network)
 7. Tokens are held in memory only (never localStorage/sessionStorage; sessionStorage carries just the OIDC state/PKCE verifier across the login redirect) and renewed silently — refresh-token grant when `useRefreshTokens` is on, hidden iframe otherwise. After a reload, one silent renew restores the session from the IdP cookie.
 
@@ -349,11 +359,10 @@ Tokens are held in memory (never localStorage/sessionStorage). This defends
 against persisted-credential theft and cross-origin reads. It does **not**
 defend against an active same-origin attacker (XSS or untrusted embedded
 script) that can read memory while present on the page — mitigate that with a
-strict CSP, Trusted Types, and SRI. Cross-tab token broadcasts are
-authenticated: a follower tab verifies the broadcast ID token's signature,
-issuer, and audience against the IdP and pins the subject before adopting any
-rotated token, and a `session-expired` signal triggers a server-verified renew
-rather than a blind logout.
+strict CSP, Trusted Types, and SRI. Cross-tab messages never transport access,
+ID, or refresh tokens. A credential-invalidation signal triggers a local
+server-verified renewal with that tab's own DPoP key, while a session-ended
+signal clears local state.
 
 `mfaVerified` / `emailVerified` on `AtolUser` are convenience copies of token
 claims for UI use; treat the server's view as authoritative for security

@@ -39,16 +39,17 @@ Frontend SDK for [Atol](https://atol.sh) -- OIDC authentication, bulk-loaded per
 
 ```
 Browser
-├─ <AtolProvider> (mount once at root)
-│  ├─ OIDC login via oidc-client-ts (Authorization Code + PKCE)
-│  ├─ JWT claims parsing -> AtolUser (sub, email, org, roles, plan, mfa)
-│  ├─ Bulk permission loading -> Map<"action:resource", boolean>
-│  └─ Device intelligence (optional, lazy-loads @atol-sh/fingerprint)
-│
-├─ useAtol()         -> { isAuthenticated, user, login(), logout(), getAccessToken() }
-├─ usePermissions()  -> { can(action, resource), cannot(action, resource) }
-├─ <Can>             -> conditional render based on permission
-└─ <ProtectedRoute>  -> auth guard + optional permission check
++-- <AtolProvider> (mount once at root)
+|   +-- OIDC login via oidc-client-ts (Authorization Code + PKCE)
+|   +-- JWT claims parsing -> AtolUser (sub, email, name, auth method, mfa)
+|   +-- Credential scope -> AtolSession.organizationId
+|   +-- Bulk permission loading -> Map<"action:resource", boolean>
+|   `-- Device intelligence (optional, lazy-loads @atol-sh/fingerprint)
+|
++-- useAtol()         -> { user, organizationId, selectOrganization(), login(), logout(), getAccessToken() }
++-- usePermissions()  -> { can(action, resource), cannot(action, resource) }
++-- <Can>             -> conditional render based on permission
+`-- <ProtectedRoute>  -> auth guard + optional permission check
 ```
 
 **Key flow:** Mount provider -> check for OIDC callback -> exchange code for tokens -> parse JWT claims -> bulk-load permissions via `BatchCheckAccess` -> expose via hooks. All `can()` calls are synchronous Map lookups.
