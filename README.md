@@ -30,7 +30,8 @@ function App() {
     <AtolProvider
       keyId="atol_kid_abc123"
       authority="https://auth.atol.sh"
-      redirectUri={window.location.origin + '/'}
+      redirectUri={window.location.origin + '/callback'}
+      postLogoutRedirectUri={window.location.origin + '/signed-out'}
       useRefreshTokens
       permissions={[
         { action: 'edit', resource: 'publication' },
@@ -44,10 +45,40 @@ function App() {
 }
 ```
 
-`redirectUri` must be an allow-listed redirect URI for this app in
-[console.atol.sh](https://console.atol.sh). `<AtolProvider>`'s `init()` handles
-the OIDC callback in place on that URL — no dedicated `/callback` route or
-component is needed.
+`redirectUri` and, when set, `postLogoutRedirectUri` must be allow-listed for
+this app in [console.atol.sh](https://console.atol.sh). `<AtolProvider>`'s
+`init()` handles the OIDC callback in place on `redirectUri`; no dedicated
+callback component is needed. `postLogoutRedirectUri` defaults to
+`redirectUri`, but a distinct signed-out landing avoids sending a logout
+response through the login-callback route.
+
+### Response-vault authorization
+
+Enable `responseVault` only for a client whose issuer discovery document
+registers the exact response-vault binding. The discovered client ID, issuer,
+audience, scope, redirect URI, client origin, and every protocol endpoint must
+match the provider configuration. DPoP is mandatory and cannot fall back to
+Bearer delivery.
+
+```tsx
+<AtolProvider
+  keyId="registered-client-id"
+  authority="https://id.example.com"
+  audience="https://api.example.com"
+  scope="openid profile email"
+  redirectUri="https://app.example.com/callback"
+  postLogoutRedirectUri="https://app.example.com/signed-out"
+  responseVault
+>
+  <YourApp />
+</AtolProvider>
+```
+
+The issuer and application must use matching secure schemes and satisfy the
+profile's same-site browser boundary. The redirect and post-logout URLs must
+be clean absolute URLs on the same application origin, without credentials,
+query, or fragment, and must be distinct. `deriveEncryptionKey` is
+incompatible because that flow uses fragment delivery.
 
 ### 3. Use the hooks
 
@@ -108,15 +139,19 @@ token, and (when `useRefreshTokens` is on) the refresh token — is never
 written to localStorage or sessionStorage, so persisted credentials are
 not readable by a later XSS payload.
 
-sessionStorage is used for exactly one thing: the OIDC state/PKCE
-verifier, which must survive the same-tab redirect to the Atol login
-page and back. It contains no tokens and is worthless after the code
-exchange completes.
+Ordinary authorization uses sessionStorage for OIDC state/PKCE plus a random
+non-secret tab generation. One non-secret localStorage authority record holds
+the origin-wide generation and durable signed-out status in the same write,
+fencing missed cross-tab signals and session resurrection. Response-vault
+mode also stores one opaque active reference in sessionStorage and bounded
+transaction custody in IndexedDB. None of these records contains bearer
+tokens.
 
 Because the in-memory store is empty after a page reload, the provider
 transparently performs one silent renew against the Atol session cookie
-on mount. Users with a live IdP session stay signed in across reloads;
-everyone else settles on unauthenticated.
+on mount. Users with a live IdP session stay signed in across reloads unless
+the durable authority is signed out. A signed-out client does not consult the
+IdP session again until the user explicitly calls `login()`.
 
 ### Everything the browser keeps
 
@@ -126,9 +161,12 @@ The browser holds only what a session needs:
 | What | Where | Survives reload? |
 |------|-------|------------------|
 | Access / ID / refresh tokens | memory only | No — re-obtained by silent renew |
-| OIDC state + PKCE verifier | `sessionStorage` | Only across the login redirect; useless after |
+| OIDC state + PKCE verifier and non-secret tab generation | `sessionStorage` | Only across the owning tab's authorization lifecycle |
+| Non-secret credential generation and signed-out tombstone | `localStorage` | Yes - fences stale callbacks and suppresses silent session resurrection until explicit login |
+| Response-vault active reference | `sessionStorage` | Only while one host-wide authorization owns the tab |
+| Response-vault intent, exact cancellation custody, and non-extractable key handles | IndexedDB | Bounded by transaction expiry; never contains bearer tokens |
 | KEK vault (zero-knowledge encryption, when `deriveEncryptionKey`) | IndexedDB, under a device-bound non-extractable key | Yes — rehydrated on load |
-| DPoP key (when `useDPoP`) | memory, per-tab non-exportable keypair | No |
+| DPoP key (ordinary `useDPoP`) | memory, per-tab non-exportable keypair | No |
 | Permissions (`usePermissions`) | memory (React state) | No — re-fetched at login |
 
 ## API Reference
@@ -142,9 +180,11 @@ Mount once at the root of your app.
 | `keyId` | `string` | Yes | Publishable key ID (`atol_kid_...`) |
 | `authority` | `string` | Yes | OIDC issuer URL (`https://auth.atol.sh`) |
 | `apiUrl` | `string` | No | Control-plane API base URL that serves permission checks and device identify. This is the API host, NOT the OIDC issuer. Device intelligence inherits it. Default: `https://api.atol.sh` |
-| `redirectUri` | `string` | Yes | URL to redirect to after login |
+| `redirectUri` | `string` | Yes | Exact registered login callback URL. Response-vault mode requires a clean secure URL with no credentials, query, or fragment |
+| `postLogoutRedirectUri` | `string` | No | URL to redirect to after RP-initiated logout. Ordinary mode defaults to `redirectUri`; response-vault mode requires an explicit, distinct clean URL on the same origin |
 | `scope` | `string` | No | OIDC scopes. Default: `"openid profile email"` |
 | `audience` | `string` | No | API audience identifier |
+| `responseVault` | `boolean` | No | Enable the exact discovered response-vault v1 browser authorization profile. Requires a registered `audience`, exact registered scope and binding values, a distinct `postLogoutRedirectUri`, and DPoP; incompatible with `deriveEncryptionKey`. Default: `false` |
 | `permissions` | `PermissionCheck[]` | No | Permissions to bulk-load at login |
 | `onLogin` | `(user: AtolUser) => void` | No | Called after successful login |
 | `onLogout` | `() => void` | No | Called once whenever an authenticated session ends, including a passive expiry/logout signal |
@@ -167,9 +207,9 @@ const {
   isAuthenticated,  // true when user is logged in
   user,             // AtolUser | null
   organizationId,   // string | null - organization bound to the credential
-  error,            // Error | null
+  error,            // AtolDiagnosticError | null
   encryptionKey,    // Uint8Array | null — unwrapped DEK (deriveEncryptionKey)
-  encryptionError,  // Error | null — DEK could not be unwrapped (wrong KEK, tamper, vault error)
+  encryptionError,  // AtolDiagnosticError | null - key unavailable
   device,           // DeviceState — device intelligence (see below)
   login,            // (options?: { returnTo?: string }) => Promise<void>
   selectOrganization, // (organizationId: string) => Promise<AtolSession>
@@ -191,6 +231,17 @@ useful when the server signals an out-of-band claim change.
 organization-scoped credential transaction and resolves with the verified
 session. If selection fails, the previous credential and `organizationId`
 remain active. Competing selections preserve the core client's latest intent.
+
+Every rejected `useAtol()` action exposes only an `AtolDiagnosticError` with a
+closed code and message. Login, organization selection, logout, token access,
+renewal, and DPoP proof failures never retain the core exception, a callback
+or resource URL, or another caught value. Mount one `<AtolProvider>` at the
+application root; a concurrent second provider is rejected instead of
+displacing the client that owns browser credentials. If teardown fails, that
+client keeps a poisoned ownership slot. A later mount retries the incomplete
+steps and cannot create a replacement unless cleanup finishes completely.
+Synchronous setup failures roll back their acquired client, and subscription
+teardown failures cannot bypass credential-client release.
 
 > **Known gap:** step-up re-authentication (`stepUp`) exists on the
 > `@atol-sh/js` core client but is not yet exposed through `useAtol()`.
@@ -317,7 +368,14 @@ if (signals?.bot || signals?.tampered) {
 
 `signals` mirrors the server's smart-signal analysis exactly:
 `bot`, `vpn`, `proxy`, `tor`, `incognito`, `tampered`, `emulator`,
-`rooted`, `geo_mismatch`, and `anomaly_score` (0-1 composite).
+`rooted`, `geo_mismatch`, `device_mismatch`, `device_shared`,
+`shared_user_count`, and `anomaly_score` (0-1 composite). The underlying core
+collector validates the exact response and fails closed on missing, unknown,
+or mistyped fields. For each credential generation, the provider asks the core
+client for the exact access-token/DPoP-proof pair bound to the identify POST.
+The device layer receives only an operation-scoped authorization callback and
+does not retain either credential. Device state is visible only while its
+credential generation and API host still match the current provider render.
 
 ## AtolUser
 
@@ -381,11 +439,13 @@ phase-out block. If your app's UI is on a different registrable domain from
 the OIDC issuer, set `useRefreshTokens` so renewal uses the refresh-token
 grant instead.
 
-**DPoP silently falls back to Bearer.** `useDPoP` requires WebCrypto
+**DPoP silently falls back to Bearer.** Optional `useDPoP` requires WebCrypto
 (`crypto.subtle`), which is unavailable in some embedded/insecure contexts.
 Check whether DPoP is actually active with the core client's
 `isDPoPActive()`, or inspect whether `signDPoPProof()` returns a `proof` —
-`undefined` means the call fell back to a plain Bearer token.
+`undefined` means the ordinary flow fell back to a plain Bearer token.
+Response-vault mode never falls back: missing WebCrypto or an invalid DPoP
+binding is a terminal initialization or grant error.
 
 **Seeing a `DPoP-Nonce` challenge in the network tab.** This is expected —
 the token endpoint issued a nonce challenge and the SDK automatically

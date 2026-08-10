@@ -19,6 +19,10 @@ const user: AtolUser = {
   mfaVerified: true,
 }
 
+class TestPermissionDiagnosticError extends Error {
+  readonly code = 'permissions_load_failed'
+}
+
 function ctx(overrides: Partial<AtolContextValue> = {}): AtolContextValue {
   const base: AtolContextValue = {
     isLoading: false,
@@ -81,7 +85,12 @@ describe('<Can>', () => {
 
   it('denies when permissions failed to load (empty map + error)', () => {
     renderWith(
-      ctx({ permissions: new Map(), permissionsError: new Error('HTTP 500') }),
+      ctx({
+        permissions: new Map(),
+        permissionsError: new TestPermissionDiagnosticError(
+          'Permissions could not be loaded.',
+        ),
+      }),
       <Can action="edit" resource="publication" fallback={<span>nope</span>}>
         <span>allowed</span>
       </Can>,

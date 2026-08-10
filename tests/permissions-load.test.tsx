@@ -45,6 +45,13 @@ const authedSession: AtolSession = atolSession()
 
 type PermSnapshot = ReturnType<typeof usePermissions>
 
+function ownErrorValues(error: Error | null): string {
+  if (!error) throw new Error('expected an Error')
+  return Object.getOwnPropertyNames(error)
+    .map((name) => String(Reflect.get(error, name)))
+    .join('\n')
+}
+
 function Harness({ onState }: { onState: (s: PermSnapshot) => void }) {
   onState(usePermissions())
   return null
@@ -119,7 +126,9 @@ describe('permission loading', () => {
     expect(mockLoad).not.toHaveBeenCalled()
     expect(onPermissionsError).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: expect.stringContaining('not scoped to an organization'),
+        code: 'permissions_organization_required',
+        message:
+          'Permissions require an organization-scoped session. Select an organization and retry.',
       }),
     )
     consoleSpy.mockRestore()
@@ -253,7 +262,10 @@ describe('permission loading', () => {
   })
 
   it('denies all and surfaces the failure when the bulk load throws', async () => {
-    const boom = new Error('Permission check failed: HTTP 500')
+    const sentinel = 'sentinel-secret-permission-response'
+    const boom = new Error(
+      `Permission check failed: HTTP 500 body=${sentinel}`,
+    )
     mockLoad.mockRejectedValue(boom)
     const onPermissionsError = vi.fn()
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -261,16 +273,42 @@ describe('permission loading', () => {
     let latest: PermSnapshot | null = null
     renderProvider({ onPermissionsError }, (s) => (latest = s))
 
-    await waitFor(() => expect(latest!.error).toBe(boom))
+    await waitFor(() =>
+      expect(latest!.error).toMatchObject({
+        name: 'AtolDiagnosticError',
+        code: 'permissions_load_failed',
+        message:
+          'Permissions could not be loaded. Retry or sign in again.',
+      }),
+    )
 
     // Deny by default holds.
     expect(latest!.can('edit', 'publication')).toBe(false)
     // ...but the failure is loud and distinguishable.
-    expect(onPermissionsError).toHaveBeenCalledWith(boom)
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('permission load failed'),
-      boom,
+    expect(onPermissionsError).toHaveBeenCalledWith(
+      latest!.error,
     )
+    expect(latest!.error).not.toBe(boom)
+    expect(latest!.error).not.toHaveProperty('cause')
+    expect(JSON.stringify(latest!.error)).not.toContain(sentinel)
+    expect(String(latest!.error)).not.toContain(sentinel)
+    expect(ownErrorValues(latest!.error)).not.toContain(sentinel)
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[Atol] permission load failed (permissions_load_failed): Permissions could not be loaded. Retry or sign in again.',
+    )
+    expect(
+      consoleSpy.mock.calls.every(
+        (args) =>
+          args.length === 1 && typeof args[0] === 'string',
+      ),
+    ).toBe(true)
+    expect(consoleSpy.mock.calls.flat().join('\n')).not.toContain(
+      sentinel,
+    )
+    const callbackError = onPermissionsError.mock.calls[0]?.[0]
+    expect(JSON.stringify(callbackError)).not.toContain(sentinel)
+    expect(String(callbackError)).not.toContain(sentinel)
+    expect(ownErrorValues(callbackError)).not.toContain(sentinel)
     consoleSpy.mockRestore()
   })
 })

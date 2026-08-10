@@ -1,78 +1,118 @@
-# Release Process
+# Release process
 
-`@atol-sh/react` depends on `@atol-sh/js` (currently `file:../atol-sdk-js`
-in `package.json`). This repo **cannot** publish or go green on CI until
-that dependency is flipped to a published npm range, because a `file:`
-dependency does not resolve on a CI runner or for an end-user `npm install`.
+`@atol-sh/react` is published from
+[`.github/workflows/release.yml`](.github/workflows/release.yml) by npm
+trusted publishing. Local manual publishing is not part of the normal release
+path.
 
-Release order:
+The package consumes `@atol-sh/js` `^0.3.0` and exposes optional device
+intelligence through `@atol-sh/fingerprint` `^0.2.0`. Neither `package.json`
+nor `package-lock.json` may contain a `file:` dependency.
 
-## 1. Publish `@atol-sh/js` first
+## Coordinated release order
 
-See `atol-sdk-js/RELEASE.md` for that package's own release steps. It must
-land on npm before anything below can work.
+1. Release compatible `@atol-sh/fingerprint` 0.2.0 first, then
+   `@atol-sh/js` 0.3.0. Each tag workflow must finish successfully, including
+   bounded registry `dist.integrity` verification.
+2. If React needs a newer fingerprint or core release, update the corresponding
+   range in
+   `package.json`, regenerate `package-lock.json` from npm, and confirm the
+   lock resolves to `https://registry.npmjs.org/`.
+3. Run the React package gates:
 
-## 2. Flip the dependency in this repo
-
-Once `@atol-sh/js` has a published version:
-
-1. In `package.json`, change:
-   ```json
-   "@atol-sh/js": "file:../atol-sdk-js"
+   ```bash
+   npm ci
+   npm run typecheck
+   npm test
+   npm run build
+   npm run verify:pack
    ```
-   to a real semver range matching the published version, e.g.:
-   ```json
-   "@atol-sh/js": "^0.1.0"
-   ```
-2. Run `npm install` to update `package-lock.json`.
-3. Run `npm run typecheck && npm test && npm run build` to confirm nothing
-   broke against the published package.
-4. Commit.
 
-**This repo's CI and release workflow cannot go green until this step is
-done.** `npm ci` on a GitHub Actions runner has no access to a sibling
-`../atol-sdk-js` checkout, so the `file:` dependency fails to resolve.
+4. Update `CHANGELOG.md`. For a version not already present in `package.json`,
+   use `npm version <patch|minor|major>` from a clean tree. This keeps the
+   committed package version and the `vX.Y.Z` tag identical. For the
+   already-staged 0.5.0, use the exact same-version path below instead.
+5. Push the commit and tag together with `git push --follow-tags`.
+6. Wait for the release workflow to verify the registry integrity before
+   updating downstream consumers.
 
-## 3. Bootstrap the package on npm
+## What the tag workflow publishes
 
-Same bootstrap as the other Atol SDK packages:
+An unprivileged qualification job verifies that the tag matches
+`package.json` and runs typechecking, tests, the build, `publint`, and
+`are-the-types-wrong`. It has no OIDC publishing authority and installs
+project dependencies with lifecycle scripts disabled.
 
-1. Manual first publish: `npm publish --access public` from a local
-   checkout, to create the package on npm (trusted publishing requires the
-   package to already exist).
-2. Configure the GitHub Actions trusted publisher on npmjs.com:
-   - org: `atol-sh`
-   - repo: `atol-sdk-react`
-   - workflow filename: `release.yml`
-3. Harden the npm package settings: require 2FA for publishing, disallow
-   classic tokens.
+The qualification job calls `npm pack --ignore-scripts --json` exactly once.
+Before any npm command, it downloads the npm 11.18.0 registry archive,
+verifies its official SHA-512, and invokes the extracted CLI directly without
+a global install. It requires npm's exact one-entry array report shape,
+computes SHA-512 from the resulting tarball bytes, and requires npm's pack
+metadata and file count to agree.
 
-> **Repository visibility.** `atol-sdk-react` is private for now.
-> `npm publish --provenance` and trusted publishing's automatic provenance
-> require a public repo, so make the repo public before the first tag-driven
-> release (ideally before the manual bootstrap publish, so the first version
-> also carries a provenance badge).
+A separate OIDC-authorized job receives only the qualified tarball. It does
+not check out the repository, install project dependencies, or globally
+install npm. Instead it independently repeats the exact npm 11.18.0 archive
+download, SHA-512 verification, and direct-CLI bootstrap. That CLI runs
+`npm pack <tarball> --dry-run
+--ignore-scripts --json`; the workflow requires the exact package name,
+tag-bound version, package id, expected SHA-512 and file count, one
+`package.json`, no bundled dependencies, and exactly `publishConfig:
+{"access":"public"}`. It then publishes the same `.tgz` bytes with provenance
+and lifecycle scripts disabled to the explicit public registry and `latest`
+tag.
 
-## 4. Thereafter: tag-driven releases
+After publish returns, the workflow polls npm for at most two minutes. The
+release succeeds only when the registry's `dist.integrity` equals the recorded
+tarball SHA-512.
 
-Once bootstrapped, every release is:
+## Exact tag path for the already-staged 0.5.0
 
-1. Update `CHANGELOG.md` for the new version and commit it (`npm version`
-   needs a clean tree).
-2. Run `npm version <patch|minor|major>`. This bumps `package.json`, commits,
-   and creates a matching `vX.Y.Z` tag in one atomic step, so the version and
-   the tag can never drift — the `release.yml` guard that checks tag ==
-   `package.json` version will always pass.
-3. Push both together: `git push --follow-tags`.
+The repository already records package version 0.5.0 even though that version
+has not been tagged or published. Do not run `npm version` for this release.
+First wait for fingerprint 0.2.0 and core 0.3.0 to be published and
+registry-verified, then regenerate the React lock from those registry artifacts
+and run all package gates.
+After all 0.5.0 source, tests, packed documentation, and changelog content are
+final, create one frozen release commit on `main`. Verify that npm still has no
+0.5.0 and Git has no `v0.5.0` tag.
 
-`.github/workflows/release.yml` publishes keylessly with provenance via
-npm trusted publishing — no long-lived npm token in CI.
+From the clean checkout of that exact commit, bind the existing manifest
+version to the tag without modifying package files:
 
-## Summary
+```bash
+version="$(node -p "require('./package.json').version")"
+test "$version" = "0.5.0"
+test "$(git branch --show-current)" = "main"
+test -z "$(git status --porcelain)"
+! git rev-parse --verify --quiet "refs/tags/v${version}"
+git tag --annotate "v${version}" --message "@atol-sh/react ${version}" HEAD
+git push --atomic origin \
+  HEAD:refs/heads/main \
+  "refs/tags/v${version}:refs/tags/v${version}"
+```
 
-| Step | Blocks on |
-|------|-----------|
-| 1. Publish `@atol-sh/js` | Nothing — do this first |
-| 2. Flip `@atol-sh/js` dependency here, install, verify, commit | Step 1 |
-| 3. Bootstrap `@atol-sh/react` on npm (manual publish + trusted publisher + hardening) | Step 2 |
-| 4. Tag-driven releases (`release.yml`) | Step 3 |
+The atomic push ensures the tag cannot reach the release workflow without the
+frozen commit it names. Do not update downstream consumers until the workflow
+has confirmed the registry `dist.integrity`.
+
+## Failure handling
+
+- If build, verification, packing, or publish fails, no downstream version
+  should be updated.
+- If publish succeeds but registry verification times out, inspect that exact
+  version on npm before doing anything else. Do not try to overwrite or
+  republish an existing npm version.
+- If npm reports a different integrity, stop the release and investigate the
+  byte mismatch. Do not advance dependent packages.
+
+## Trusted publisher configuration
+
+The npm package is configured for GitHub Actions trusted publishing with:
+
+- Organization: `atol-sh`
+- Repository: `atol-sdk-react`
+- Workflow filename: `release.yml`
+
+The workflow uses GitHub OIDC and provenance. It must not use a long-lived
+`NPM_TOKEN`.

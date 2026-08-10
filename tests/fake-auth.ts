@@ -127,6 +127,12 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
     for (const cb of subscribers) cb(session)
   }
 
+  function clearEncryption(): void {
+    encKey?.fill(0)
+    encKey = undefined
+    encError = undefined
+  }
+
   const proofResult = (): DPoPProofResult | undefined => {
     if (!accessToken) return undefined
     return { token: accessToken, proof: dpopActive ? 'fake.dpop.proof' : undefined }
@@ -159,8 +165,7 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
       // The real client clears its derived key + wipes the vault on logout.
       accessToken = undefined
       idToken = undefined
-      encKey = undefined
-      encError = undefined
+      clearEncryption()
       emit(UNAUTH)
     }),
     forceRenew: spies.forceRenew.mockImplementation(async () => {
@@ -213,8 +218,7 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
     drop: () => {
       accessToken = undefined
       idToken = undefined
-      encKey = undefined
-      encError = undefined
+      clearEncryption()
       emit(UNAUTH)
     },
     setEncryption: (next: { key?: Uint8Array; error?: Error }) => {

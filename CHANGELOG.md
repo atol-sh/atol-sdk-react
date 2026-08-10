@@ -6,7 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-07-21
+## [0.5.0] - Staged, unpublished
+
+This staged release consolidates every change since the last published version,
+0.3.3. It has no publication date or release tag because registry publication
+and integrity verification have not completed.
+
+### Added
+
+- `responseVault` forwards the public response-vault v1 authorization profile
+  to the core client, including discovery registration validation and
+  navigation-channel-safe response delivery.
+- `postLogoutRedirectUri` is forwarded to the core browser-auth client so
+  applications can keep authorization callbacks and signed-out landings on
+  distinct registered routes. Ordinary authorization defaults it to
+  `redirectUri`; response-vault authorization requires an explicit distinct
+  route.
 
 ### Changed
 
@@ -16,9 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AtolUser` no longer exposes organization, plan, or role fields.
 - `useAtol().selectOrganization(organizationId)` delegates to the core
   client's atomic credential transaction and returns its verified session.
+- Public action failures now reject with bounded `AtolDiagnosticError` codes.
+  Core exceptions, callback/resource URLs, and caught values are discarded.
 - Type checking now covers tests and fakes as well as production source.
-- Requires `@atol-sh/js` `^0.2.0` for grant-bound organization selection,
-  strict callback/access-token verification, and lifecycle-safe commits.
+- Requires `@atol-sh/js` `^0.3.0`. Earlier core releases do not implement the
+  response-vault config or its fail-closed discovery and settlement contract;
+  this range also includes the grant-bound organization-selection and
+  lifecycle protections staged for the same coordinated release.
+- Device identification now acquires the Bearer token or DPoP token/proof pair
+  atomically from the core client for the exact identify URL. React passes only
+  a non-secret credential generation and operation-scoped owner to the device
+  layer, so bound tokens cannot be downgraded or retained in device state.
+- Published device state is tagged with its credential generation and API host.
+  Rendering hides old-session and old-region state synchronously, before
+  passive cleanup effects run.
 
 ### Fixed
 
@@ -33,6 +59,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   late permission results cannot restore grants or fire `onLogin`.
 - `onLogout` now fires exactly once for both manual and passive authenticated
   to unauthenticated transitions.
+- A second active provider can no longer replace the credential-owning client.
+  A different client whose teardown is already pending is destroyed before
+  replacement; a genuine Strict Mode remount still adopts the exact client.
+  Failed teardown retains a poisoned ownership slot, blocks replacement with
+  `provider_client_cleanup_failed`, and retries only incomplete cleanup steps.
+- Synchronous subscription or initialization setup now rolls back its acquired
+  client immediately. Subscription teardown releases client custody in a
+  `finally` path and exposes only `provider_client_cleanup_failed`.
+- Opt-in test-session bridge registration is part of the same acquisition
+  transaction; a rejected registration cannot strand an active client slot.
+
+### Security
+
+- The provider inherits the core client's durable signed-out tombstone:
+  reloads cannot silently restore an IdP session after logout, even without
+  `BroadcastChannel`, and only an explicit `login()` starts fresh authority.
+- `logout()` continues to clear React credential-derived state immediately
+  while propagating refresh revocation, lifecycle cleanup, or end-session
+  failures to the caller as the closed `logout_failed` diagnostic.
 
 ## [0.3.3] - 2026-07-19
 
@@ -191,4 +236,5 @@ Initial release.
   identify contract: `deviceId`, `known`, `confidence`, `newDevice`,
   `platform`, `browser`, `osVersion`, and smart signals
   (`bot`, `vpn`, `proxy`, `tor`, `incognito`, `tampered`, `emulator`,
-  `rooted`, `geo_mismatch`, `anomaly_score`).
+  `rooted`, `geo_mismatch`, `device_mismatch`, `device_shared`,
+  `shared_user_count`, `anomaly_score`).

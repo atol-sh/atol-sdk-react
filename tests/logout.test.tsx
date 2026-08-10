@@ -128,6 +128,41 @@ describe('AtolProvider.logout()', () => {
     expect(fake.spies.logout).toHaveBeenCalledTimes(1)
   })
 
+  it('surfaces a closed logout failure while keeping local state signed out', async () => {
+    fake = makeFakeAuth({
+      initialSession: authedSession,
+      accessToken: 'at',
+      idToken: makeIDToken(),
+    })
+    fake.spies.logout.mockRejectedValueOnce(
+      new Error('end-session revocation failed'),
+    )
+    let latest: Snapshot | null = null
+    render(
+      <AtolProvider
+        keyId="atol_kid_test"
+        authority="https://atol.test"
+        redirectUri="https://app.test/cb"
+      >
+        <Harness onReady={(s) => (latest = s)} />
+      </AtolProvider>,
+    )
+    await waitFor(() => expect(latest!.isAuthenticated).toBe(true))
+
+    await act(async () => {
+      await expect(latest!.logout()).rejects.toMatchObject({
+        name: 'AtolDiagnosticError',
+        code: 'logout_failed',
+        message:
+          'Sign-out cleanup did not complete. Retry sign-out.',
+      })
+    })
+
+    expect(latest!.isAuthenticated).toBe(false)
+    expect(latest!.user).toBeNull()
+    expect(latest!.permissions.size).toBe(0)
+  })
+
   it('fires onLogout once for a passive authenticated-to-unauthenticated transition', async () => {
     fake = makeFakeAuth({
       initialSession: authedSession,

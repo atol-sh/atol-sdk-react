@@ -47,6 +47,13 @@ import { useAtol } from '../src/hooks/use-atol'
 
 type Snapshot = ReturnType<typeof useAtol>
 
+function ownErrorValues(error: Error | null): string {
+  if (!error) throw new Error('expected an Error')
+  return Object.getOwnPropertyNames(error)
+    .map((name) => String(Reflect.get(error, name)))
+    .join('\n')
+}
+
 function Harness({ onState }: { onState: (s: Snapshot) => void }) {
   onState(useAtol())
   return null
@@ -87,6 +94,39 @@ describe('AtolProvider init', () => {
     expect(fake.spies.init).toHaveBeenCalledTimes(1)
   })
 
+  it('forwards the response-vault profile and distinct logout landing', async () => {
+    fake = makeFakeAuth()
+    let captured: Record<string, unknown> | undefined
+    authFactory = (config) => {
+      captured = config as Record<string, unknown>
+      return fake
+    }
+
+    let latest: Snapshot | null = null
+    render(
+      <AtolProvider
+        keyId="atol_kid_test"
+        authority="https://id.app.test"
+        redirectUri="https://app.test/callback"
+        postLogoutRedirectUri="https://app.test/signed-out"
+        audience="https://api.app.test"
+        responseVault
+        useDPoP
+      >
+        <Harness onState={(s) => (latest = s)} />
+      </AtolProvider>,
+    )
+
+    await waitFor(() => expect(latest!.isLoading).toBe(false))
+    expect(captured).toMatchObject({
+      redirectUri: 'https://app.test/callback',
+      postLogoutRedirectUri: 'https://app.test/signed-out',
+      audience: 'https://api.app.test',
+      responseVault: true,
+      dpop: true,
+    })
+  })
+
   it('mirrors an authenticated session into React state', async () => {
     fake = makeFakeAuth({
       initialSession: authedSession,
@@ -113,16 +153,42 @@ describe('AtolProvider init', () => {
   })
 
   it('surfaces an init failure as error state, not a crash', async () => {
+    const sentinel = 'sentinel-secret-auth-init'
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     fake = makeFakeAuth()
-    fake.spies.init.mockRejectedValue(new Error('No matching state found in storage'))
+    fake.spies.init.mockRejectedValue(
+      new Error(
+        `No matching state for https://app.test/cb?code=${sentinel}`,
+      ),
+    )
 
     let latest: Snapshot | null = null
     renderProvider((s) => (latest = s))
 
     await waitFor(() => expect(latest!.isLoading).toBe(false))
     expect(latest!.isAuthenticated).toBe(false)
-    expect(latest!.error).toBeInstanceOf(Error)
+    expect(latest!.error).toMatchObject({
+      name: 'AtolDiagnosticError',
+      code: 'auth_initialization_failed',
+      message:
+        'Authentication could not be initialized. Retry sign-in.',
+    })
+    expect(latest!.error).not.toHaveProperty('cause')
+    expect(JSON.stringify(latest!.error)).not.toContain(sentinel)
+    expect(String(latest!.error)).not.toContain(sentinel)
+    expect(ownErrorValues(latest!.error)).not.toContain(sentinel)
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[Atol] auth init failed (auth_initialization_failed): Authentication could not be initialized. Retry sign-in.',
+    )
+    expect(
+      consoleSpy.mock.calls.every(
+        (args) =>
+          args.length === 1 && typeof args[0] === 'string',
+      ),
+    ).toBe(true)
+    expect(consoleSpy.mock.calls.flat().join('\n')).not.toContain(
+      sentinel,
+    )
     consoleSpy.mockRestore()
   })
 
@@ -137,6 +203,46 @@ describe('AtolProvider init', () => {
     await waitFor(() => expect(latest!.isLoading).toBe(false))
     expect(latest!.isAuthenticated).toBe(false)
     expect(latest!.error).toBeNull()
+  })
+
+  it('surfaces token acquisition failure without retaining the thrown value', async () => {
+    const sentinel = 'sentinel-secret-token-error'
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {})
+    fake = makeFakeAuth({
+      initialSession: authedSession,
+      accessToken: 'at_1',
+      idToken: makeIDToken(),
+    })
+    fake.spies.getAccessToken.mockRejectedValue(
+      new Error(`token ${sentinel} could not be renewed`),
+    )
+
+    let latest: Snapshot | null = null
+    renderProvider((state) => (latest = state))
+
+    await waitFor(() =>
+      expect(latest!.error).toMatchObject({
+        code: 'session_token_unavailable',
+        message:
+          'The session access token is unavailable. Sign in again.',
+      }),
+    )
+    expect(latest!.error).not.toHaveProperty('cause')
+    expect(JSON.stringify(latest!.error)).not.toContain(sentinel)
+    expect(String(latest!.error)).not.toContain(sentinel)
+    expect(ownErrorValues(latest!.error)).not.toContain(sentinel)
+    expect(
+      consoleSpy.mock.calls.every(
+        (args) =>
+          args.length === 1 && typeof args[0] === 'string',
+      ),
+    ).toBe(true)
+    expect(consoleSpy.mock.calls.flat().join('\n')).not.toContain(
+      sentinel,
+    )
+    consoleSpy.mockRestore()
   })
 
   it('delegates forceRenew to the client', async () => {
@@ -214,7 +320,12 @@ describe('AtolProvider init', () => {
     expect(latest!.selectOrganization).toBeTypeOf('function')
     await expect(
       latest!.selectOrganization(OTHER_ORGANIZATION_ID),
-    ).rejects.toThrow('organization selection denied')
+    ).rejects.toMatchObject({
+      name: 'AtolDiagnosticError',
+      code: 'organization_selection_failed',
+      message:
+        'Organization selection failed. Retry or sign in again.',
+    })
     expect(latest!.organizationId).toBe(ORGANIZATION_ID)
   })
 
@@ -244,7 +355,12 @@ describe('AtolProvider init', () => {
     expect(latest!.selectOrganization).toBeTypeOf('function')
     const first = latest!.selectOrganization(OTHER_ORGANIZATION_ID)
     const second = latest!.selectOrganization(THIRD_ORGANIZATION_ID)
-    const firstRejected = expect(first).rejects.toThrow('stale organization selection')
+    const firstRejected = expect(first).rejects.toMatchObject({
+      name: 'AtolDiagnosticError',
+      code: 'organization_selection_failed',
+      message:
+        'Organization selection failed. Retry or sign in again.',
+    })
 
     const latestSession = atolSession({ organizationId: THIRD_ORGANIZATION_ID })
     await act(async () => {
@@ -505,6 +621,8 @@ describe('AtolProvider init', () => {
     )
 
     expect(created).toHaveLength(2)
+    expect(created[0].spies.destroy).toHaveBeenCalledTimes(1)
+    expect(created[1].spies.destroy).not.toHaveBeenCalled()
     expect(configs[0].initialTestSession).toBe(firstSession)
     expect(configs[1].initialTestSession).toBe(secondSession)
   })

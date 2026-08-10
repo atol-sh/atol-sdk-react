@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/react",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Atol React SDK — authentication and frontend authorization",
   "license": "Apache-2.0",
   "type": "module",
@@ -57,12 +57,12 @@
   },
   "author": "Atol",
   "dependencies": {
-    "@atol-sh/js": "^0.2.0",
+    "@atol-sh/js": "^0.3.0",
     "jose": "^5.10.0",
     "oidc-client-ts": "^3.3.0"
   },
   "peerDependencies": {
-    "@atol-sh/fingerprint": ">=0.1.0",
+    "@atol-sh/fingerprint": "^0.2.0",
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0"
   },

@@ -1,5 +1,33 @@
 import '@testing-library/jest-dom/vitest'
 
+function memoryStorage(): Storage {
+  const values = new Map<string, string>()
+  return {
+    get length() {
+      return values.size
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => Array.from(values.keys())[index] ?? null,
+    removeItem: (key) => {
+      values.delete(key)
+    },
+    setItem: (key, value) => {
+      values.set(key, String(value))
+    },
+  }
+}
+
+if (
+  typeof window !== 'undefined' &&
+  typeof window.localStorage === 'undefined'
+) {
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: memoryStorage(),
+  })
+}
+
 // AtolProvider's mount effect shares one auth client across a React Strict
 // Mode double-invoke via a module-scoped slot with a deferred (macrotask)
 // teardown -- see the comment above `sharedClientSlot` in `src/provider.tsx`.
@@ -23,4 +51,5 @@ import '@testing-library/jest-dom/vitest'
 afterEach(async () => {
   const { __resetAtolSharedClientForTests } = await import('../src/provider')
   __resetAtolSharedClientForTests()
+  window.localStorage.clear()
 })

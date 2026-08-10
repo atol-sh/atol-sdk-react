@@ -19,6 +19,29 @@ export type {
   TokenResponse,
 }
 
+export type AtolDiagnosticCode =
+  | 'auth_initialization_failed'
+  | 'provider_already_mounted'
+  | 'provider_not_mounted'
+  | 'provider_client_cleanup_failed'
+  | 'login_failed'
+  | 'organization_selection_failed'
+  | 'logout_failed'
+  | 'session_token_unavailable'
+  | 'session_renewal_failed'
+  | 'dpop_proof_unavailable'
+  | 'permissions_organization_required'
+  | 'permissions_load_failed'
+  | 'encryption_key_unavailable'
+
+/**
+ * A bounded, non-secret provider diagnostic. `code` and `message` are closed
+ * SDK values; caught exceptions and upstream response details are discarded.
+ */
+export interface AtolDiagnosticError extends Error {
+  readonly code: AtolDiagnosticCode
+}
+
 /** Configuration for the AtolProvider. */
 export interface AtolConfig {
   /** Publishable key ID (atol_kid_...). Safe for frontend code. */
@@ -39,11 +62,27 @@ export interface AtolConfig {
   /** URL to redirect to after login. */
   redirectUri: string
 
+  /**
+   * URL to redirect to after RP-initiated logout. Defaults to `redirectUri`.
+   * Configure a distinct registered route when login callbacks and signed-out
+   * landings must have separate processing boundaries.
+   */
+  postLogoutRedirectUri?: string
+
   /** OIDC scopes. Default: "openid profile email". */
   scope?: string
 
   /** API audience identifier. */
   audience?: string
+
+  /**
+   * Enable the response-vault v1 browser authorization profile. The core
+   * validates the issuer's discovery registration and keeps authorization
+   * responses out of navigation URLs. Requires `audience`, a distinct
+   * `postLogoutRedirectUri`, and DPoP; it is incompatible with
+   * `deriveEncryptionKey`.
+   */
+  responseVault?: boolean
 
   /** Permissions to bulk-load after login. */
   permissions?: PermissionCheck[]
@@ -61,7 +100,7 @@ export interface AtolConfig {
    * distinguish "user has no permissions" from "permissions failed to
    * load" (and e.g. show a retry UI instead of a permanent access-denied).
    */
-  onPermissionsError?: (error: Error) => void
+  onPermissionsError?: (error: AtolDiagnosticError) => void
 
   /** Device intelligence configuration. */
   deviceIntelligence?: DeviceConfig
@@ -151,7 +190,7 @@ export interface AtolState {
    */
   organizationId: string | null
 
-  error: Error | null
+  error: AtolDiagnosticError | null
   permissions: Map<string, boolean>
 
   /**
@@ -159,7 +198,7 @@ export interface AtolState {
    * still deny by default; this flag lets the app tell "denied" apart
    * from "failed to load". Cleared on the next successful load.
    */
-  permissionsError: Error | null
+  permissionsError: AtolDiagnosticError | null
 
   /** Unwrapped data encryption key (DEK) for client-side encryption.
    * Non-null after login when deriveEncryptionKey is enabled. */
@@ -172,39 +211,49 @@ export interface AtolState {
    * failure as "encryption disabled". Distinct from "feature off", where
    * both `encryptionKey` and `encryptionError` are null.
    */
-  encryptionError: Error | null
+  encryptionError: AtolDiagnosticError | null
 }
 
 /** Auth methods exposed by the provider. */
 export interface AtolActions {
+  /**
+   * Start interactive sign-in. Rejects with `login_failed` or
+   * `provider_not_mounted`; core exceptions and callback URLs are discarded.
+   */
   login: (options?: { returnTo?: string }) => Promise<void>
 
   /**
    * Atomically replace the current credential pair with one scoped to the
    * requested organization. The previous credential remains active if the
    * core operation rejects. Competing calls follow the core client's latest
-   * credential-transaction intent.
+   * credential-transaction intent. Failures reject with the closed
+   * `organization_selection_failed` diagnostic.
    */
   selectOrganization: (organizationId: string) => Promise<AtolSession>
 
   /**
-   * Sign out via OIDC RP-Initiated Logout. Async because the SDK first
-   * looks up the current ID token to include as `id_token_hint`. The
-   * returned promise resolves when oidc-client-ts has issued the
-   * navigation; existing fire-and-forget callers (`logout()`) keep
-   * working without awaiting.
+   * Persist durable signed-out authority, clear local and React-derived
+   * state, attempt remote revocation, and start OIDC RP-Initiated Logout.
+   * The promise rejects when an observable teardown or end-session step
+   * fails; the durable tombstone still prevents silent session restoration.
+   * The rejection is the closed `logout_failed` diagnostic.
    */
   logout: () => Promise<void>
+
+  /** Rejects with `session_token_unavailable`; core errors are discarded. */
   getAccessToken: () => Promise<string | undefined>
 
   /**
    * Force an immediate silent renew, bypassing the local expiry check.
-   * Resolves to the newly-issued access token (or undefined on failure).
+   * Resolves to the newly-issued access token, or undefined when there is no
+   * active session.
    *
    * Reloads permissions as part of the renew, so this is the way to pick
    * up an out-of-band grant/revocation on demand. Normal callers should
    * rely on `getAccessToken`, which renews automatically at `exp - 60s`
    * (and also reloads permissions on each renewal).
+   *
+   * Failures reject with the closed `session_renewal_failed` diagnostic.
    */
   forceRenew: () => Promise<string | undefined>
 
@@ -227,8 +276,8 @@ export interface AtolActions {
    *
    * `url` MUST be an absolute URL. The proof's `htu` is the scheme +
    * authority + path with query/fragment stripped; a relative or
-   * unparseable URL throws rather than shipping a proof the resource
-   * server would reject.
+   * unparseable URL rejects with the closed `dpop_proof_unavailable`
+   * diagnostic rather than retaining the URL or core error.
    */
   signDPoPProof: (method: string, url: string) => Promise<DPoPProofResult | undefined>
 }

@@ -42,6 +42,13 @@ import { useAtol } from '../src/hooks/use-atol'
 
 type Snapshot = ReturnType<typeof useAtol>
 
+function ownErrorValues(error: Error | null): string {
+  if (!error) throw new Error('expected an Error')
+  return Object.getOwnPropertyNames(error)
+    .map((name) => String(Reflect.get(error, name)))
+    .join('\n')
+}
+
 function Harness({ onState }: { onState: (s: Snapshot) => void }) {
   onState(useAtol())
   return null
@@ -98,7 +105,10 @@ describe('AtolProvider -- encryption key mirroring', () => {
     // tampered wrapped-DEK): error set, key absent. The provider must
     // reflect that as encryptionError !== null AND encryptionKey === null --
     // never a silently-wrong key.
-    const tamperError = new Error('unwrapDEK: AES-GCM auth tag failed')
+    const sentinel = 'sentinel-secret-wrapped-dek'
+    const tamperError = new Error(
+      `unwrapDEK: AES-GCM auth tag failed for ${sentinel}`,
+    )
     fake = makeFakeAuth({
       initialSession: authedSession,
       accessToken: 'at_1',
@@ -110,7 +120,21 @@ describe('AtolProvider -- encryption key mirroring', () => {
 
     await waitFor(() => expect(latest!.isLoading).toBe(false))
     expect(latest!.encryptionKey).toBeNull()
-    expect(latest!.encryptionError).toBe(tamperError)
+    expect(latest!.encryptionError).toMatchObject({
+      name: 'AtolDiagnosticError',
+      code: 'encryption_key_unavailable',
+      message:
+        "Encryption key unavailable. Sign in again or clear this site's stored data.",
+    })
+    expect(latest!.encryptionError).not.toBe(tamperError)
+    expect(latest!.encryptionError).not.toHaveProperty('cause')
+    expect(JSON.stringify(latest!.encryptionError)).not.toContain(
+      sentinel,
+    )
+    expect(String(latest!.encryptionError)).not.toContain(sentinel)
+    expect(ownErrorValues(latest!.encryptionError)).not.toContain(
+      sentinel,
+    )
   })
 
   it('deriveEncryptionKey OFF: no key, no error even if the core reported one', async () => {
@@ -190,7 +214,12 @@ describe('AtolProvider -- encryption key mirroring', () => {
       // The core newly reports a tamper on renew: error set, no key.
       fake.setEncryption({ key: undefined, error: tamperError })
     })
-    await waitFor(() => expect(latest!.encryptionError).toBe(tamperError))
+    await waitFor(() =>
+      expect(latest!.encryptionError).toMatchObject({
+        code: 'encryption_key_unavailable',
+      }),
+    )
+    expect(latest!.encryptionError).not.toBe(tamperError)
     // The stale key must be gone.
     expect(latest!.encryptionKey).toBeNull()
   })

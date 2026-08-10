@@ -7,7 +7,6 @@ import {
   useState,
 } from 'react'
 import {
-  createAtolBrowserAuth,
   type AtolBrowserAuth,
   type AtolSession,
   type DPoPProofResult,
@@ -15,108 +14,45 @@ import {
 } from '@atol-sh/js'
 import { AtolContext } from './context'
 import { loadPermissions } from './lib/permissions'
-import { registerTestClient, clearTestClient } from './lib/test-bridge'
 import { DeviceProvider } from './device/DeviceProvider'
-import type { AtolConfig, AtolUser, PermissionCheck } from './types'
+import type { DeviceAuthorizationOwner } from '@atol-sh/js/device'
+import {
+  closedDiagnosticError,
+  diagnosticError,
+  logDiagnostic,
+} from './diagnostics'
+import {
+  acquireProviderClient,
+  releaseProviderClient,
+  resetProviderClientForTests,
+  rollbackProviderClient,
+} from './provider-client'
+import type {
+  AtolConfig,
+  AtolDiagnosticCode,
+  AtolDiagnosticError,
+  AtolUser,
+  PermissionCheck,
+} from './types'
 
 export type AtolProviderProps = PropsWithChildren<AtolConfig>
 
 /** Control-plane API host that serves AccessService + device identify. */
 const DEFAULT_API_URL = 'https://api.atol.sh'
 
-/**
- * Module-scoped bridge across React 19 Strict Mode's synchronous
- * mount -> cleanup -> remount cycle.
- *
- * The core client's callback processing (oidc-client-ts's
- * `signinRedirectCallback` -> `readSigninResponseState`) removes the
- * single-use OIDC state/PKCE entry from sessionStorage as the FIRST step of
- * validating an authorization-code callback -- before the token-endpoint
- * exchange even starts. Building a SECOND, independent
- * `createAtolBrowserAuth` client for Strict Mode's real mount (as this
- * provider used to: fresh client per effect run, `destroy()`ed on cleanup)
- * races that removal against the throwaway mount's client: whichever
- * client's `init()` reaches the state store first wins the exchange, and
- * the other's `completeLogin()` fails with "No matching state found in
- * storage" and settles permanently unauthenticated -- the core swallows
- * that failure into `clearSession()` inside `init()`, so no error ever
- * reaches this provider or the app. The throwaway client's own exchange can
- * still succeed against the live token endpoint (which is why a manual curl
- * replay of the same flow is accepted server-side), but its result lands
- * nowhere: `destroy()` already cleared its subscriber set before the
- * exchange resolved.
- *
- * The fix: collapse Strict Mode's double mount onto a SINGLE client
- * instance instead of racing two. `auth.init()` is memoized on the core
- * client (a second call returns the same in-flight/settled promise), so
- * reusing the same instance for both the throwaway and the real mount means
- * only one `completeLogin()` ever runs against sessionStorage -- no race.
- * Teardown is deferred by one macrotask on cleanup: if a remount follows
- * synchronously -- which Strict Mode's double-invoke always does, within
- * the same passive-effects flush, before any timer can fire -- it cancels
- * the pending teardown and adopts the client instead of building a new one.
- * A genuine unmount (no remount follows in that tick) lets the timer fire
- * and destroys the client for real, exactly once.
- */
-interface SharedClientSlot {
-  key: string
-  auth: AtolBrowserAuth
-  teardownTimer: ReturnType<typeof setTimeout> | null
-}
-let sharedClientSlot: SharedClientSlot | null = null
-
-// `initialTestSession` contains bearer credentials and refresh-token material,
-// so it must never participate in a serialized config key. Object identity is
-// deliberately conservative: the same object can be reused across React's
-// Strict Mode effect replay, while any newly supplied token response forces a
-// fresh core client even when its non-secret configuration is unchanged.
-const initialTestSessionIDs = new WeakMap<object, number>()
-let nextInitialTestSessionID = 1
-
-function initialTestSessionID(
-  session: AtolConfig['initialTestSession'],
-): number {
-  if (!session) return 0
-  const existing = initialTestSessionIDs.get(session)
-  if (existing !== undefined) return existing
-  const id = nextInitialTestSessionID++
-  initialTestSessionIDs.set(session, id)
-  return id
-}
-
-/**
- * Stable identity for the auth client's construction config. Only fields
- * that actually shape `createAtolBrowserAuth()` participate -- callbacks
- * (onLogin/onLogout/onPermissionsError) and the permission-check list are
- * mirrored into refs and read live by the effect, never baked into the
- * client, so they are deliberately excluded.
- */
-function clientConfigKey(cfg: {
-  authority: string
-  keyId: string
-  redirectUri: string
-  scope: string
-  audience: string | undefined
-  useDPoP: boolean
-  useRefreshTokens: boolean
-  useRefreshTokensFallback: boolean
-  deriveEncryptionKey: boolean
-  allowTestSessions: boolean
-  initialTestSession: AtolConfig['initialTestSession']
-}): string {
-  return JSON.stringify([
-    cfg.authority,
-    cfg.keyId,
-    cfg.redirectUri,
-    cfg.scope,
-    cfg.audience ?? '',
-    cfg.useDPoP,
-    cfg.useRefreshTokens,
-    cfg.useRefreshTokensFallback,
-    cfg.deriveEncryptionKey,
-    cfg.allowTestSessions,
-    cfg.allowTestSessions ? initialTestSessionID(cfg.initialTestSession) : 0,
-  ])
+async function runProviderAction<T>(
+  auth: AtolBrowserAuth | null,
+  failureCode: AtolDiagnosticCode,
+  operation: (active: AtolBrowserAuth) => Promise<T>,
+): Promise<T> {
+  if (!auth) {
+    throw diagnosticError('provider_not_mounted')
+  }
+  try {
+    return await operation(auth)
+  } catch {
+    throw diagnosticError(failureCode)
+  }
 }
 
 /**
@@ -125,7 +61,7 @@ function clientConfigKey(cfg: {
  * teardown is pending or it is still actively mounted).
  *
  * The deferred-teardown window that makes Strict Mode's double-invoke safe
- * (see the comment above `sharedClientSlot`) is scoped to "does a remount
+ * (see `provider-client.ts`) is scoped to "does a remount
  * follow synchronously in this effects flush", not "does another render()
  * call happen eventually". A test harness that unmounts one `<AtolProvider>`
  * render and mounts another with the same config (React Testing Library's
@@ -136,15 +72,7 @@ function clientConfigKey(cfg: {
  * file's `afterEach`, e.g. `@atol-sh/react`'s own `tests/setup.ts`.
  */
 export function __resetAtolSharedClientForTests(): void {
-  const slot = sharedClientSlot
-  sharedClientSlot = null
-  if (!slot) return
-  if (slot.teardownTimer !== null) clearTimeout(slot.teardownTimer)
-  slot.auth.destroy()
-  // Mirror the deferred-teardown path's bridge cleanup (see the effect
-  // cleanup below). A no-op when this client was never the registered test
-  // client (allowTestSessions off, or already superseded).
-  clearTestClient(slot.auth)
+  resetProviderClientForTests()
 }
 
 /**
@@ -158,8 +86,8 @@ export function __resetAtolSharedClientForTests(): void {
  * state and layers the React-specific concerns (permission loading, device
  * intelligence) on top. Zero-knowledge encryption (KEK/DEK derivation,
  * vault management, fail-loud-on-tamper) is owned by the core client -- the
- * provider only mirrors the resulting `encryptionKey` / `encryptionError`
- * from the session payload into React state.
+ * provider mirrors the resulting `encryptionKey` and converts only the
+ * presence of `encryptionError` into a bounded React diagnostic.
  *
  * This is a client component: it uses React context, browser crypto, and
  * IndexedDB. Under Next.js App Router (or any RSC framework) it must be
@@ -172,6 +100,7 @@ export function __resetAtolSharedClientForTests(): void {
  *   keyId="atol_kid_abc123"
  *   authority="https://auth.atol.sh"
  *   redirectUri="https://app.example.com/callback"
+ *   postLogoutRedirectUri="https://app.example.com/signed-out"
  * >
  *   <App />
  * </AtolProvider>
@@ -190,8 +119,10 @@ export function AtolProvider({
   authority,
   apiUrl = DEFAULT_API_URL,
   redirectUri,
+  postLogoutRedirectUri,
   scope = 'openid profile email',
   audience,
+  responseVault = false,
   permissions: permissionChecks = [],
   onLogin,
   onLogout,
@@ -200,33 +131,36 @@ export function AtolProvider({
   deriveEncryptionKey,
   useRefreshTokens = false,
   useRefreshTokensFallback = false,
-  useDPoP = false,
+  useDPoP,
   allowTestSessions = false,
   initialTestSession,
 }: AtolProviderProps) {
   const [isLoading, setIsLoading] = useState(true)
   const [user, setUser] = useState<AtolUser | null>(null)
   const [organizationId, setOrganizationId] = useState<string | null>(null)
-  const [error, setError] = useState<Error | null>(null)
+  const [error, setError] =
+    useState<AtolDiagnosticError | null>(null)
   const [permissions, setPermissions] = useState<Map<string, boolean>>(new Map())
-  const [permissionsError, setPermissionsError] = useState<Error | null>(null)
-  const [accessToken, setAccessToken] = useState<string | undefined>()
+  const [permissionsError, setPermissionsError] =
+    useState<AtolDiagnosticError | null>(null)
+  const [deviceCredentialGeneration, setDeviceCredentialGeneration] =
+    useState<number | null>(null)
   // Zero-knowledge encryption key/error. Derived by the core client (KEK
   // from the URL fragment, wrapped DEK from the ID token, unwrap +
   // device-bound vault); the provider only mirrors the result from the
   // session-change payload. Starts null and is populated once the core
   // settles a session under `deriveEncryptionKey`.
   const [encryptionKey, setEncryptionKey] = useState<Uint8Array | null>(null)
-  // Non-null when the core reports an expected DEK could not be unwrapped
-  // (wrong KEK, a tampered wrapped-DEK auth-tag failure, or a vault error).
-  // Surfaced so the app can deny encrypted operations instead of silently
-  // treating a failure as "encryption off".
-  const [encryptionError, setEncryptionError] = useState<Error | null>(null)
+  // Non-null when the core reports an expected DEK could not be unwrapped.
+  // The core Error object is never retained; React exposes one closed
+  // diagnostic so the app can deny encrypted operations safely.
+  const [encryptionError, setEncryptionError] =
+    useState<AtolDiagnosticError | null>(null)
 
   // The single auth client that owns the session + renewal. Every
   // credential decision (token access, renewal, DPoP proof, login, logout)
   // delegates here. The instance is created (or, on a Strict Mode remount,
-  // adopted from `sharedClientSlot` -- see the module-scoped comment above)
+  // adopted through `provider-client.ts`)
   // inside the mount effect below, NOT in the render body, so its lifetime
   // is tied to the effect rather than to a single render. The action
   // callbacks read this ref only after mount, by which point the effect has
@@ -261,17 +195,33 @@ export function AtolProvider({
     ): Promise<void> => {
       const checks = permissionChecksRef.current
       if (checks.length === 0) return
+      const publishFailure = (
+        code: Extract<
+          AtolDiagnosticCode,
+          | 'permissions_organization_required'
+          | 'session_token_unavailable'
+          | 'permissions_load_failed'
+        >,
+      ): void => {
+        if (!isCurrent()) return
+        const diagnostic = diagnosticError(code)
+        logDiagnostic('permission load', diagnostic)
+        setPermissionsError(diagnostic)
+        try {
+          callbacksRef.current.onPermissionsError?.(diagnostic)
+        } catch {
+          // A host callback cannot change the deny-by-default result.
+        }
+      }
+      if (!credentialOrganizationId) {
+        publishFailure('permissions_organization_required')
+        return
+      }
+      if (!token) {
+        publishFailure('session_token_unavailable')
+        return
+      }
       try {
-        if (!credentialOrganizationId) {
-          throw new Error(
-            'Cannot load permissions: the current credential is not scoped to an organization',
-          )
-        }
-        if (!token) {
-          throw new Error(
-            'Cannot load permissions: the authenticated session has no access token',
-          )
-        }
         let dpop: DPoPSigner | undefined
         if (authRef.current?.isDPoPActive()) {
           const expectedAccessToken = token
@@ -315,15 +265,11 @@ export function AtolProvider({
         if (!isCurrent()) return
         setPermissions(perms)
         setPermissionsError(null)
-      } catch (err) {
-        if (!isCurrent()) return
-        // Deny-by-default stays in force (the permission map was cleared),
-        // but the failure is surfaced so the app can tell "no permissions"
-        // apart from "failed to load".
-        const permErr = err instanceof Error ? err : new Error(String(err))
-        console.error('[Atol] permission load failed, denying all:', permErr)
-        setPermissionsError(permErr)
-        callbacksRef.current.onPermissionsError?.(permErr)
+      } catch {
+        // Deny-by-default stays in force (the permission map was cleared).
+        // The caught value is deliberately discarded before state, callbacks,
+        // or console diagnostics are updated.
+        publishFailure('permissions_load_failed')
       }
     },
     [apiUrl, keyId],
@@ -338,60 +284,25 @@ export function AtolProvider({
    * on mount; the client is torn down on unmount.
    */
   useEffect(() => {
-    // Resolve the client for this effect-mount: adopt the shared instance
-    // from a still-pending teardown (a Strict Mode remount landing on the
-    // throwaway mount's client) when its config matches, otherwise build a
-    // fresh one. See the module-scoped comment above `sharedClientSlot` for
-    // why reuse -- not "always fresh" -- is what makes this Strict
-    // Mode-safe. The client owns the zero-knowledge KEK/DEK flow entirely
-    // (fragment capture before the callback URL is stripped, vault
-    // provision/rehydrate, fail-loud unwrap) -- gated on deriveEncryptionKey
-    // -- so the provider does none of it.
-    const key = clientConfigKey({
-      authority,
-      keyId,
-      redirectUri,
-      scope,
-      audience,
-      useDPoP,
-      useRefreshTokens,
-      useRefreshTokensFallback,
-      deriveEncryptionKey: deriveEncryptionKey === true,
-      allowTestSessions,
-      initialTestSession,
-    })
-
     let auth: AtolBrowserAuth
-    const pending = sharedClientSlot
-    if (pending && pending.key === key && pending.teardownTimer !== null) {
-      // A remount landed on the still-torn-down-pending client from a
-      // throwaway mount in the same synchronous effects flush. Cancel the
-      // scheduled teardown and adopt it instead of building (and racing) a
-      // second one.
-      clearTimeout(pending.teardownTimer)
-      pending.teardownTimer = null
-      auth = pending.auth
-    } else {
-      auth = createAtolBrowserAuth({
-        issuer: authority,
-        clientId: keyId,
+    try {
+      auth = acquireProviderClient({
+        authority,
+        keyId,
         redirectUri,
-        scopes: scope,
+        postLogoutRedirectUri,
+        scope,
         audience,
-        dpop: useDPoP,
+        responseVault,
+        useDPoP,
         useRefreshTokens,
         useRefreshTokensFallback,
         deriveEncryptionKey: deriveEncryptionKey === true,
-        storage: 'memory',
         allowTestSessions,
         initialTestSession,
       })
-      sharedClientSlot = { key, auth, teardownTimer: null }
-      // TEST ONLY: when the seam is enabled, publish this client so
-      // `installAtolTestHook()` (from `@atol-sh/react/testing`) can seed a
-      // session into it. Inert -- and the bridge is never touched --
-      // otherwise.
-      if (allowTestSessions) registerTestClient(auth)
+    } catch (error) {
+      throw closedDiagnosticError(error, 'auth_initialization_failed')
     }
     authRef.current = auth
     let cancelled = false
@@ -410,7 +321,7 @@ export function AtolProvider({
       const credentialOrganizationId = atolUser ? session.organizationId : undefined
       setUser(atolUser)
       setOrganizationId(credentialOrganizationId ?? null)
-      setAccessToken(undefined)
+      setDeviceCredentialGeneration(null)
       // A permission result is valid only for the exact credential context
       // that produced it. Clear it before resolving the new token/scope so a
       // failed or superseded organization transition cannot retain grants
@@ -421,7 +332,8 @@ export function AtolProvider({
         callbacksRef.current.onLogout?.()
       }
 
-      // Mirror the core-derived zero-knowledge key/error into React state on
+      // Mirror the core-derived zero-knowledge key into React state and map
+      // only the presence of its error into a closed diagnostic on
       // every session change. The core owns derivation (provision on a fresh
       // callback, rehydrate on restore/renew) and fails loud on tamper (an
       // AES-GCM auth-tag failure sets encryptionError with no key). The
@@ -429,14 +341,35 @@ export function AtolProvider({
       // React contract stays `T | null`.
       if (deriveEncryptionKey) {
         setEncryptionKey(session.encryptionKey ?? null)
-        setEncryptionError(session.encryptionError ?? null)
+        setEncryptionError(
+          session.encryptionError
+            ? diagnosticError('encryption_key_unavailable')
+            : null,
+        )
       }
 
       if (atolUser) {
-        const res = await auth.getAccessToken()
+        let res: Awaited<ReturnType<typeof auth.getAccessToken>>
+        try {
+          res = await auth.getAccessToken()
+        } catch {
+          if (!isCurrent()) return
+          const diagnostic = diagnosticError(
+            'session_token_unavailable',
+          )
+          logDiagnostic('session token', diagnostic)
+          setError(diagnostic)
+          await reloadPermissions(
+            atolUser,
+            credentialOrganizationId,
+            undefined,
+            isCurrent,
+          )
+          return
+        }
         if (!isCurrent()) return
         const token = res?.token
-        setAccessToken(token)
+        setDeviceCredentialGeneration(token ? epoch : null)
 
         // Permissions are tied to identity; refresh on every renewal so
         // grants/revocations take effect mid-session.
@@ -453,7 +386,7 @@ export function AtolProvider({
           callbacksRef.current.onLogin?.(atolUser)
         }
       } else {
-        setAccessToken(undefined)
+        setDeviceCredentialGeneration(null)
         if (lastUserId !== null) {
           lastUserId = null
           // A session drop from the core (terminal renewal failure /
@@ -466,54 +399,61 @@ export function AtolProvider({
       }
     }
 
-    const unsubscribe = auth.onSessionChange((session) => {
-      void onSession(session)
-    })
-
-    // Clear the loading gate only when the initial settle completes (the
-    // redirect callback or the silent restore), NOT on the immediate
-    // pre-init unauthenticated fire from onSessionChange -- otherwise a
-    // reload would flash "signed out" before the restore finishes. `init()`
-    // is memoized on the client (a second call, from a remount that adopted
-    // this same instance, returns the SAME promise) -- calling it here
-    // unconditionally is what makes the redirect-callback exchange run
-    // exactly once across a Strict Mode double-mount.
-    auth
-      .init()
-      .catch((err) => {
-        // A stale/failed callback settles unauthenticated; surface it as
-        // error state (not a crash). Never surface token material.
-        if (!cancelled) {
-          console.error('[Atol] auth init failed:', err)
-          setError(err instanceof Error ? err : new Error(String(err)))
-        }
+    let unsubscribe: (() => void) | undefined
+    try {
+      unsubscribe = auth.onSessionChange((session) => {
+        void onSession(session)
       })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false)
-      })
+      auth
+        .init()
+        .catch(() => {
+          if (!cancelled) {
+            const diagnostic = diagnosticError(
+              'auth_initialization_failed',
+            )
+            logDiagnostic('auth init', diagnostic)
+            setError(diagnostic)
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setIsLoading(false)
+        })
+    } catch {
+      cancelled = true
+      if (authRef.current === auth) authRef.current = null
+      let cleanupFailed = false
+      try {
+        unsubscribe?.()
+      } catch {
+        cleanupFailed = true
+      }
+      try {
+        rollbackProviderClient(auth)
+      } catch {
+        cleanupFailed = true
+      }
+      throw diagnosticError(
+        cleanupFailed
+          ? 'provider_client_cleanup_failed'
+          : 'auth_initialization_failed',
+      )
+    }
 
     return () => {
       cancelled = true
-      unsubscribe()
-      // Drop the ref if it still points at the client this cleanup is
-      // (maybe) tearing down, so a stale/destroyed instance is never read by
-      // an action callback in the gap before a possible remount re-populates
-      // it.
-      if (authRef.current === auth) authRef.current = null
-      // Defer the actual teardown by one macrotask instead of destroying
-      // synchronously. Strict Mode's double-invoke runs mount -> cleanup ->
-      // remount synchronously within the same passive-effects flush -- well
-      // before any timer fires -- so a remount reusing this instance (the
-      // branch above) always cancels this timer first. Only a genuine
-      // unmount, where no remount follows, lets it fire and tear the client
-      // down for real, exactly once.
-      if (sharedClientSlot && sharedClientSlot.auth === auth) {
-        const slot = sharedClientSlot
-        slot.teardownTimer = setTimeout(() => {
-          auth.destroy()
-          if (allowTestSessions) clearTestClient(auth)
-          if (sharedClientSlot === slot) sharedClientSlot = null
-        }, 0)
+      let cleanupFailed = false
+      try {
+        unsubscribe()
+      } catch {
+        cleanupFailed = true
+      } finally {
+        if (authRef.current === auth) authRef.current = null
+        releaseProviderClient(auth, (diagnostic) => {
+          logDiagnostic('provider client cleanup', diagnostic)
+        })
+      }
+      if (cleanupFailed) {
+        throw diagnosticError('provider_client_cleanup_failed')
       }
     }
     // Only run on mount. The client is built (or adopted) once from the
@@ -524,18 +464,23 @@ export function AtolProvider({
   }, [])
 
   const login = useCallback(
-    async (options?: { returnTo?: string }) => {
-      await authRef.current!.beginLogin({ returnTo: options?.returnTo })
-    },
+    (options?: { returnTo?: string }) =>
+      runProviderAction(
+        authRef.current,
+        'login_failed',
+        (auth) =>
+          auth.beginLogin({ returnTo: options?.returnTo }),
+      ),
     [],
   )
 
   const selectOrganization = useCallback(
-    async (organizationId: string): Promise<AtolSession> => {
-      const auth = authRef.current
-      if (!auth) throw new Error('AtolProvider is not mounted')
-      return auth.selectOrganization(organizationId)
-    },
+    (organizationId: string): Promise<AtolSession> =>
+      runProviderAction(
+        authRef.current,
+        'organization_selection_failed',
+        (auth) => auth.selectOrganization(organizationId),
+      ),
     [],
   )
 
@@ -546,22 +491,37 @@ export function AtolProvider({
     sessionEpochRef.current++
     setUser(null)
     setOrganizationId(null)
-    setAccessToken(undefined)
+    setDeviceCredentialGeneration(null)
     setPermissions(new Map())
     setPermissionsError(null)
     setEncryptionKey(null)
     setEncryptionError(null)
-    await authRef.current!.logout()
+    await runProviderAction(
+      authRef.current,
+      'logout_failed',
+      (auth) => auth.logout(),
+    )
   }, [])
 
-  const getAccessToken = useCallback(async (): Promise<string | undefined> => {
-    const res = await authRef.current?.getAccessToken()
-    return res?.token
-  }, [])
+  const getAccessToken = useCallback(
+    (): Promise<string | undefined> =>
+      runProviderAction(
+        authRef.current,
+        'session_token_unavailable',
+        async (auth) => (await auth.getAccessToken())?.token,
+      ),
+    [],
+  )
 
-  const forceRenew = useCallback(async (): Promise<string | undefined> => {
-    return authRef.current?.forceRenew()
-  }, [])
+  const forceRenew = useCallback(
+    (): Promise<string | undefined> =>
+      runProviderAction(
+        authRef.current,
+        'session_renewal_failed',
+        (auth) => auth.forceRenew(),
+      ),
+    [],
+  )
 
   /**
    * Sign a DPoP resource-server proof (RFC 9449 §7) for a request to the
@@ -572,8 +532,36 @@ export function AtolProvider({
    * to plain Bearer.
    */
   const signDPoPProof = useCallback(
-    async (method: string, url: string): Promise<DPoPProofResult | undefined> => {
-      return authRef.current?.signDPoPProof(method, url)
+    (
+      method: string,
+      url: string,
+    ): Promise<DPoPProofResult | undefined> =>
+      runProviderAction(
+        authRef.current,
+        'dpop_proof_unavailable',
+        (auth) => auth.signDPoPProof(method, url),
+      ),
+    [],
+  )
+
+  const authorizeDeviceIdentify = useCallback<DeviceAuthorizationOwner>(
+    async ({ method, url }) => {
+      const credential = await authRef.current?.getAccessToken({
+        dpop: { method, url },
+      })
+      if (!credential) {
+        throw diagnosticError('session_token_unavailable')
+      }
+      return credential.proof
+        ? {
+            scheme: 'DPoP',
+            accessToken: credential.token,
+            dpopProof: credential.proof,
+          }
+        : {
+            scheme: 'Bearer',
+            accessToken: credential.token,
+          }
     },
     [],
   )
@@ -617,7 +605,11 @@ export function AtolProvider({
   const content = deviceIntelligence?.enabled ? (
     // Device intelligence shares the control-plane API host by default;
     // an explicit deviceIntelligence.apiUrl still wins.
-    <DeviceProvider config={{ apiUrl, ...deviceIntelligence }} accessToken={accessToken}>
+    <DeviceProvider
+      config={{ apiUrl, ...deviceIntelligence }}
+      credentialGeneration={deviceCredentialGeneration}
+      authorize={authorizeDeviceIdentify}
+    >
       {children}
     </DeviceProvider>
   ) : (

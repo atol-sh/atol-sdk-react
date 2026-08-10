@@ -46,7 +46,7 @@ describe('AtolProvider initialTestSession', () => {
       <AtolProvider
         keyId="atol_kid_test"
         authority="https://auth.atol.test"
-        redirectUri="https://app.test/cb"
+        redirectUri={`${window.location.origin}/cb`}
         allowTestSessions
         initialTestSession={tokens()}
       >

@@ -6,8 +6,6 @@
  */
 export {
   LoginRequiredError,
-  silentAuthorize,
-  silentAuthorizeWithRetry,
   exchangeCode,
   refreshTokenGrant,
   DEFAULT_AUTHORIZE_TIMEOUT_MS,
