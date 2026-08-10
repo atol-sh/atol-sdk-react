@@ -34,6 +34,11 @@ export interface FakeAuthConfig {
   /** Whether DPoP is active (drives signDPoPProof's proof + isDPoPActive). */
   dpopActive?: boolean
   /**
+   * Whether the fake models response-vault authorization. Defaults to false,
+   * matching ordinary authorization where `cancelLogin()` is unavailable.
+   */
+  responseVault?: boolean
+  /**
    * Zero-knowledge encryption key the core would have derived. When set,
    * the initial (and re-emitted) session carries it as `encryptionKey`,
    * exactly as the real client does under `deriveEncryptionKey`. The
@@ -81,6 +86,7 @@ export interface FakeAuth extends AtolBrowserAuth {
   spies: {
     init: ReturnType<typeof vi.fn>
     beginLogin: ReturnType<typeof vi.fn>
+    cancelLogin: ReturnType<typeof vi.fn>
     selectOrganization: ReturnType<typeof vi.fn>
     logout: ReturnType<typeof vi.fn>
     forceRenew: ReturnType<typeof vi.fn>
@@ -95,6 +101,7 @@ const UNAUTH: AtolSession = { isAuthenticated: false, user: null }
 
 /** Build a controllable fake browser-auth client. */
 export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
+  let initialized = false
   let encKey = config.encryptionKey
   let encError = config.encryptionError
   // The initial session carries the configured encryption key/error, exactly
@@ -105,11 +112,13 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
   let accessToken = config.accessToken
   let idToken = config.idToken
   const dpopActive = config.dpopActive ?? false
+  const responseVault = config.responseVault ?? false
   const subscribers = new Set<(s: AtolSession) => void>()
 
   const spies = {
     init: vi.fn(),
     beginLogin: vi.fn().mockResolvedValue(undefined),
+    cancelLogin: vi.fn(),
     selectOrganization: vi.fn(),
     logout: vi.fn().mockResolvedValue(undefined),
     forceRenew: vi.fn(),
@@ -142,12 +151,29 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
     init: spies.init.mockImplementation(async () => {
       // Settle into the configured session and notify subscribers, exactly
       // as the real client does at the end of init().
+      initialized = true
       emit(config.initialSession ?? UNAUTH)
       return session
     }),
     beginLogin: spies.beginLogin,
     stepUp: vi.fn().mockResolvedValue(undefined),
     completeLogin: vi.fn().mockImplementation(async () => session),
+    cancelLogin: spies.cancelLogin.mockImplementation(async () => {
+      if (!responseVault) {
+        throw new Error('cancelLogin requires response-vault authorization')
+      }
+      if (
+        initialized ||
+        session.isAuthenticated ||
+        session.user !== null ||
+        accessToken !== undefined ||
+        idToken !== undefined
+      ) {
+        throw new Error('cancelLogin requires an uninitialized signed-out client')
+      }
+      // Abandoning a pending login does not establish or end a session, so the
+      // fake deliberately preserves signed-out state without emitting an event.
+    }),
     selectOrganization: spies.selectOrganization.mockImplementation(
       async (organizationId: string): Promise<AtolSession> => {
         if (!session.user) {

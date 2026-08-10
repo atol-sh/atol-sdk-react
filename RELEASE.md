@@ -31,7 +31,8 @@ nor `package-lock.json` may contain a `file:` dependency.
 4. Update `CHANGELOG.md`. For a version not already present in `package.json`,
    use `npm version <patch|minor|major>` from a clean tree. This keeps the
    committed package version and the `vX.Y.Z` tag identical. For the
-   already-staged 0.5.0, use the exact same-version path below instead.
+   already-staged 0.5.1 recovery, use the exact same-version path below
+   instead.
 5. Push the commit and tag together with `git push --follow-tags`.
 6. Wait for the release workflow to verify the registry integrity before
    updating downstream consumers.
@@ -66,23 +67,28 @@ After publish returns, the workflow polls npm for at most two minutes. The
 release succeeds only when the registry's `dist.integrity` equals the recorded
 tarball SHA-512.
 
-## Exact tag path for the already-staged 0.5.0
+## Exact tag path for the already-staged 0.5.1 recovery
 
-The repository already records package version 0.5.0 even though that version
-has not been tagged or published. Do not run `npm version` for this release.
-First wait for fingerprint 0.2.0 and core 0.3.0 to be published and
-registry-verified, then regenerate the React lock from those registry artifacts
-and run all package gates.
-After all 0.5.0 source, tests, packed documentation, and changelog content are
+The `v0.5.0` tag already exists, and its release workflow failed before
+publishing because its committed lock integrity does not match the public
+`@atol-sh/js` 0.3.0 tarball. The tag is immutable release history: do not move,
+delete, recreate, or reuse `v0.5.0`, even though npm has no
+`@atol-sh/react` 0.5.0.
+
+The repository already records recovery package version 0.5.1 even though that
+version has not been tagged or published. Do not run `npm version` for this
+release. Regenerate the React lock from the registry-verified fingerprint 0.2.0
+and core 0.3.0 artifacts, then run all package gates.
+After all 0.5.1 source, tests, packed documentation, and changelog content are
 final, create one frozen release commit on `main`. Verify that npm still has no
-0.5.0 and Git has no `v0.5.0` tag.
+0.5.1 and Git has no `v0.5.1` tag.
 
 From the clean checkout of that exact commit, bind the existing manifest
 version to the tag without modifying package files:
 
 ```bash
 version="$(node -p "require('./package.json').version")"
-test "$version" = "0.5.0"
+test "$version" = "0.5.1"
 test "$(git branch --show-current)" = "main"
 test -z "$(git status --porcelain)"
 ! git rev-parse --verify --quiet "refs/tags/v${version}"

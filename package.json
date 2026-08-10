@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/react",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Atol React SDK — authentication and frontend authorization",
   "license": "Apache-2.0",
   "type": "module",

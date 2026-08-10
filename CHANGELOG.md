@@ -6,11 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0] - Staged, unpublished
+## [0.5.1] - Staged, unpublished
 
-This staged release consolidates every change since the last published version,
-0.3.3. It has no publication date or release tag because registry publication
-and integrity verification have not completed.
+This staged recovery release consolidates every change since the last published
+version, 0.3.3. The immutable `v0.5.0` tag failed before registry publication
+because its committed `@atol-sh/js` 0.3.0 lock integrity did not match the
+public tarball. Version 0.5.0 remains unpublished, and its tag must not be moved
+or reused. Version 0.5.1 has no publication date or release tag because registry
+publication and integrity verification have not completed.
 
 ### Added
 
