@@ -5,14 +5,14 @@
 trusted publishing. Local manual publishing is not part of the normal release
 path.
 
-The package consumes `@atol-sh/js` `^0.3.0` and exposes optional device
+The package consumes `@atol-sh/js` `^0.4.0` and exposes optional device
 intelligence through `@atol-sh/fingerprint` `^0.2.0`. Neither `package.json`
 nor `package-lock.json` may contain a `file:` dependency.
 
 ## Coordinated release order
 
 1. Release compatible `@atol-sh/fingerprint` 0.2.0 first, then
-   `@atol-sh/js` 0.3.0. Each tag workflow must finish successfully, including
+   `@atol-sh/js` 0.4.0. Each tag workflow must finish successfully, including
    bounded registry `dist.integrity` verification.
 2. If React needs a newer fingerprint or core release, update the corresponding
    range in
@@ -28,12 +28,11 @@ nor `package-lock.json` may contain a `file:` dependency.
    npm run verify:pack
    ```
 
-4. Update `CHANGELOG.md`. For a version not already present in `package.json`,
-   use `npm version <patch|minor|major>` from a clean tree. This keeps the
-   committed package version and the `vX.Y.Z` tag identical. For the
-   already-staged 0.5.1 recovery, use the exact same-version path below
-   instead.
-5. Push the commit and tag together with `git push --follow-tags`.
+4. Update `CHANGELOG.md` and set the package version without creating a tag:
+   `npm version <patch|minor|major> --no-git-tag-version --ignore-scripts`.
+   Skip this command when the reviewed release version is already present.
+5. Commit the qualified release tree, then create and push only its exact tag
+   using the atomic path below.
 6. Wait for the release workflow to verify the registry integrity before
    updating downstream consumers.
 
@@ -63,32 +62,18 @@ tag-bound version, package id, expected SHA-512 and file count, one
 and lifecycle scripts disabled to the explicit public registry and `latest`
 tag.
 
-After publish returns, the workflow polls npm for at most two minutes. The
+After publish returns, the workflow polls npm for at most five minutes. The
 release succeeds only when the registry's `dist.integrity` equals the recorded
 tarball SHA-512.
 
-## Exact tag path for the already-staged 0.5.1 recovery
+## Exact release tag path
 
-The `v0.5.0` tag already exists, and its release workflow failed before
-publishing because its committed lock integrity does not match the public
-`@atol-sh/js` 0.3.0 tarball. The tag is immutable release history: do not move,
-delete, recreate, or reuse `v0.5.0`, even though npm has no
-`@atol-sh/react` 0.5.0.
-
-The repository already records recovery package version 0.5.1 even though that
-version has not been tagged or published. Do not run `npm version` for this
-release. Regenerate the React lock from the registry-verified fingerprint 0.2.0
-and core 0.3.0 artifacts, then run all package gates.
-After all 0.5.1 source, tests, packed documentation, and changelog content are
-final, create one frozen release commit on `main`. Verify that npm still has no
-0.5.1 and Git has no `v0.5.1` tag.
-
-From the clean checkout of that exact commit, bind the existing manifest
-version to the tag without modifying package files:
+After the release commit is final and all package gates pass, bind its manifest
+version to one annotated tag and push that commit and tag atomically:
 
 ```bash
+set -euo pipefail
 version="$(node -p "require('./package.json').version")"
-test "$version" = "0.5.1"
 test "$(git branch --show-current)" = "main"
 test -z "$(git status --porcelain)"
 ! git rev-parse --verify --quiet "refs/tags/v${version}"
@@ -98,9 +83,8 @@ git push --atomic origin \
   "refs/tags/v${version}:refs/tags/v${version}"
 ```
 
-The atomic push ensures the tag cannot reach the release workflow without the
-frozen commit it names. Do not update downstream consumers until the workflow
-has confirmed the registry `dist.integrity`.
+Do not update downstream consumers until the workflow has confirmed the
+registry `dist.integrity`.
 
 ## Failure handling
 

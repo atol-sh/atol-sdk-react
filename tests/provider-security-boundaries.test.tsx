@@ -519,4 +519,72 @@ describe('AtolProvider security boundaries', () => {
       sentinel,
     )
   })
+
+  it('restarts an eligible response-vault login instead of beginning a new one', async () => {
+    fake = makeFakeAuth()
+    fake.spies.canRestartLogin.mockReturnValue(true)
+
+    let latest: Snapshot | null = null
+    renderProvider((state) => (latest = state))
+    await waitFor(() => expect(latest!.isLoading).toBe(false))
+
+    await act(async () => {
+      await latest!.login({ returnTo: '/account' })
+    })
+
+    expect(fake.spies.restartLogin).toHaveBeenCalledOnce()
+    expect(fake.spies.restartLogin).toHaveBeenCalledWith({
+      returnTo: '/account',
+    })
+    expect(fake.spies.beginLogin).not.toHaveBeenCalled()
+  })
+
+  it('sanitizes an eligible response-vault restart rejection', async () => {
+    const sentinel = 'sentinel-secret-login-restart'
+    fake = makeFakeAuth()
+    fake.spies.canRestartLogin.mockReturnValue(true)
+    fake.spies.restartLogin.mockRejectedValue({
+      authorizationResponse: sentinel,
+      toString: () => sentinel,
+    })
+
+    let latest: Snapshot | null = null
+    renderProvider((state) => (latest = state))
+    await waitFor(() => expect(latest!.isLoading).toBe(false))
+
+    let error: unknown
+    await act(async () => {
+      error = await latest!.login().catch(
+        (caught: unknown) => caught,
+      )
+    })
+
+    expect(error).toMatchObject({
+      name: 'AtolDiagnosticError',
+      code: 'login_failed',
+      message: 'Sign-in could not be started. Retry.',
+    })
+    expect(error).not.toHaveProperty('cause')
+    expect(JSON.stringify(error)).not.toContain(sentinel)
+    expect(String(error)).not.toContain(sentinel)
+    expect(fake.spies.beginLogin).not.toHaveBeenCalled()
+  })
+
+  it('begins an ordinary login when response-vault restart is unavailable', async () => {
+    fake = makeFakeAuth()
+
+    let latest: Snapshot | null = null
+    renderProvider((state) => (latest = state))
+    await waitFor(() => expect(latest!.isLoading).toBe(false))
+
+    await act(async () => {
+      await latest!.login({ returnTo: '/account' })
+    })
+
+    expect(fake.spies.beginLogin).toHaveBeenCalledOnce()
+    expect(fake.spies.beginLogin).toHaveBeenCalledWith({
+      returnTo: '/account',
+    })
+    expect(fake.spies.restartLogin).not.toHaveBeenCalled()
+  })
 })

@@ -6,14 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.1] - Staged, unpublished
+## [0.5.2] - 2026-10-26
 
-This staged recovery release consolidates every change since the last published
-version, 0.3.3. The immutable `v0.5.0` tag failed before registry publication
-because its committed `@atol-sh/js` 0.3.0 lock integrity did not match the
-public tarball. Version 0.5.0 remains unpublished, and its tag must not be moved
-or reused. Version 0.5.1 has no publication date or release tag because registry
-publication and integrity verification have not completed.
+### Changed
+
+- Requires `@atol-sh/js` `^0.4.0` for response-vault login recovery.
+- Updated vulnerable development-tool dependencies within their existing
+  compatible version ranges.
+- Release verification now allows npm registry processing for up to five
+  minutes while retaining exact tarball-integrity enforcement.
+
+### Fixed
+
+- `login()` now delegates to the core client's exact restart operation when a
+  rejected response-vault initialization can be recovered. Ordinary sign-in
+  continues to begin a new authorization operation.
+
+## [0.5.1] - 2026-08-10
+
+This recovery release consolidates every change since version 0.3.3. The
+immutable `v0.5.0` tag failed before registry publication because its committed
+`@atol-sh/js` 0.3.0 lock integrity did not match the public tarball. Version
+0.5.0 remains unpublished, and its tag must not be moved or reused.
 
 ### Added
 

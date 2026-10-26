@@ -24,9 +24,9 @@ import {
 import {
   acquireProviderClient,
   releaseProviderClient,
-  resetProviderClientForTests,
   rollbackProviderClient,
 } from './provider-client'
+import { runProviderAction } from './provider-actions'
 import type {
   AtolConfig,
   AtolDiagnosticCode,
@@ -40,40 +40,9 @@ export type AtolProviderProps = PropsWithChildren<AtolConfig>
 /** Control-plane API host that serves AccessService + device identify. */
 const DEFAULT_API_URL = 'https://api.atol.sh'
 
-async function runProviderAction<T>(
-  auth: AtolBrowserAuth | null,
-  failureCode: AtolDiagnosticCode,
-  operation: (active: AtolBrowserAuth) => Promise<T>,
-): Promise<T> {
-  if (!auth) {
-    throw diagnosticError('provider_not_mounted')
-  }
-  try {
-    return await operation(auth)
-  } catch {
-    throw diagnosticError(failureCode)
-  }
-}
-
-/**
- * TEST ONLY. Force-clear the module-scoped shared-client bridge and
- * synchronously destroy whatever client currently occupies it (whether its
- * teardown is pending or it is still actively mounted).
- *
- * The deferred-teardown window that makes Strict Mode's double-invoke safe
- * (see `provider-client.ts`) is scoped to "does a remount
- * follow synchronously in this effects flush", not "does another render()
- * call happen eventually". A test harness that unmounts one `<AtolProvider>`
- * render and mounts another with the same config (React Testing Library's
- * per-test `cleanup()`, run via a global `afterEach`) does NOT run inside
- * that flush, so without this reset the next test's mount would wrongly
- * adopt the previous test's still-pending-teardown client instead of
- * building its own. Not part of the public API -- call from a test setup
- * file's `afterEach`, e.g. `@atol-sh/react`'s own `tests/setup.ts`.
- */
-export function __resetAtolSharedClientForTests(): void {
-  resetProviderClientForTests()
-}
+export {
+  resetProviderClientForTests as __resetAtolSharedClientForTests,
+} from './provider-client'
 
 /**
  * AtolProvider wraps your app with authentication (OIDC) and
@@ -468,8 +437,12 @@ export function AtolProvider({
       runProviderAction(
         authRef.current,
         'login_failed',
-        (auth) =>
-          auth.beginLogin({ returnTo: options?.returnTo }),
+        (auth) => {
+          const loginOptions = { returnTo: options?.returnTo }
+          return auth.canRestartLogin()
+            ? auth.restartLogin(loginOptions)
+            : auth.beginLogin(loginOptions)
+        },
       ),
     [],
   )

@@ -86,6 +86,8 @@ export interface FakeAuth extends AtolBrowserAuth {
   spies: {
     init: ReturnType<typeof vi.fn>
     beginLogin: ReturnType<typeof vi.fn>
+    canRestartLogin: ReturnType<typeof vi.fn>
+    restartLogin: ReturnType<typeof vi.fn>
     cancelLogin: ReturnType<typeof vi.fn>
     selectOrganization: ReturnType<typeof vi.fn>
     logout: ReturnType<typeof vi.fn>
@@ -118,6 +120,8 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
   const spies = {
     init: vi.fn(),
     beginLogin: vi.fn().mockResolvedValue(undefined),
+    canRestartLogin: vi.fn().mockReturnValue(false),
+    restartLogin: vi.fn().mockResolvedValue(undefined),
     cancelLogin: vi.fn(),
     selectOrganization: vi.fn(),
     logout: vi.fn().mockResolvedValue(undefined),
@@ -156,6 +160,8 @@ export function makeFakeAuth(config: FakeAuthConfig = {}): FakeAuth {
       return session
     }),
     beginLogin: spies.beginLogin,
+    canRestartLogin: spies.canRestartLogin,
+    restartLogin: spies.restartLogin,
     stepUp: vi.fn().mockResolvedValue(undefined),
     completeLogin: vi.fn().mockImplementation(async () => session),
     cancelLogin: spies.cancelLogin.mockImplementation(async () => {

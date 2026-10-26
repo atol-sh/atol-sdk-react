@@ -240,7 +240,9 @@ describe('release workflow', () => {
     expect(workflow).toContain(
       'entries.length !== 1 || entries[0] !== filename',
     )
-    expect(workflow).toContain('for attempt in $(seq 1 12)')
+    expect(workflow).toContain('deadline=$((SECONDS + 300))')
+    expect(workflow).toContain('while true; do')
+    expect(workflow).toContain('[ "$SECONDS" -ge "$deadline" ]')
     expect(workflow).toContain('sleep 5')
     expect(workflow).toContain(
       'registry_integrity" != "$EXPECTED_INTEGRITY',

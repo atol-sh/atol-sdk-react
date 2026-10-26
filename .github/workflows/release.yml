@@ -521,7 +521,7 @@ jobs:
           --registry=https://registry.npmjs.org/ --tag=latest
 
       # Registry metadata can lag the successful publish response. Poll for at
-      # most two minutes, then require byte identity with the qualified artifact.
+      # most five minutes, then require byte identity with the qualified artifact.
       - name: Verify published registry integrity
         shell: bash
         env:
@@ -533,7 +533,10 @@ jobs:
           set -euo pipefail
 
           view_error="$RUNNER_TEMP/npm-view-error.txt"
-          for attempt in $(seq 1 12); do
+          deadline=$((SECONDS + 300))
+          attempt=0
+          while true; do
+            attempt=$((attempt + 1))
             if registry_json="$(
               timeout 5s node "$NPM_CLI" view \
                 "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity \
@@ -570,8 +573,8 @@ jobs:
               fi
             fi
 
-            if [ "$attempt" -eq 12 ]; then
-              echo "registry did not expose dist.integrity after 12 attempts" >&2
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "registry did not expose dist.integrity within five minutes (${attempt} attempts)" >&2
               if [ -s "$view_error" ]; then
                 cat "$view_error" >&2
               fi
